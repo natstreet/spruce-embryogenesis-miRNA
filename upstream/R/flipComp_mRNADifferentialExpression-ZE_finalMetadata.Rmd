@@ -1,0 +1,447 @@
+---
+title: "Spruce ZE mRNA Differential Expression"
+author: "Theerarat Kochakarn"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_width: 12
+    fig_height: 9
+    toc: true
+    number_sections: true
+    toc_depth: 6
+    toc_float:
+      collapsed: FALSE
+      smooth_scroll: TRUE
+    code_folding: hide
+    theme: "flatly"
+    highlight: pygments
+  # includes:
+  #   before_body: header.html
+  #   after_body: footer.html
+  # css: style.css
+---
+
+````{r opts, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+````
+
+# Setup
+
+* Libraries
+````{r library,results='hide',warning=FALSE,message=FALSE}
+library(data.table)
+library(DESeq2)
+library(emoji)
+library(gplots)
+library(here)
+library(hyperSpec)
+library(PCAtools)
+library(RColorBrewer)
+library(tidyverse)
+library(ggVennDiagram)
+library(pheatmap)
+library(UpSetR)
+library(viridis)
+library(patchwork)
+library(tximport)
+````
+
+* Helper files
+````{r helpers,results='hide',warning=FALSE,message=FALSE}
+source(here("../UPSCb-common/Rtoolbox/src/plotEnrichedTreemap.R"))
+source(here("../UPSCb-common/src/R/featureSelection.R"))
+source(here("../UPSCb-common/src/R/volcanoPlot.R"))
+source(here("../UPSCb-common/src/R/functions_DifferentialExpression_withres.R"))
+````
+
+* Color schemes
+````{r}
+pal=brewer.pal(8,"Dark2")
+hpal <- colorRampPalette(c("blue","white","red"))(100)
+mar <- par("mar")
+colorList <- list("all" = "purple","up" = "red","dn" = "blue")
+
+anncol = list("plant" = c("nonplant" = "#D95F02","plant" = "#1B9E77"),
+              "known" = c("known" = "#8DD3C7", "variant" = "#BEBADA", "novel" = "#FFFFB3"),
+              "sizeFactor" = colorRampPalette(brewer.pal(9,"RdPu"))(20),
+              "DE" = c("up" = "red","dn" = "blue"),
+              "StageType" = c(
+                #setNames(brewer.pal(9,"Greens")[2:9],paste0("SE_",1:8)),
+                setNames(brewer.pal(9,"Purples")[2:4],paste0("SD_",1:3)),
+                setNames(brewer.pal(9,"Blues")[4:9],paste0("ZE_",c(4:7,"8-9",10))),
+                setNames(brewer.pal(9,"Reds")[4:9],paste0("FG_",c(4:7,"8-9",10)))))
+````
+
+* tx2gene
+````{r, message = FALSE}
+# tx2gene <- read_tsv("reference/Picea-abies/v2.0/annotation/tx2gene_Picab02_all.tsv.gz", col_names=c("TXID","GENE"))
+tx2gene <- read_tsv("reference/Picea-abies/v2.0/annotation/tx2gene_Picab02_all.tsv.gz", col_names=c("TXID","GENE"))
+````
+
+* Sample information
+
+Read metadata
+````{r}
+sampInfo <- read_csv(here("doc/metadataZE_mRNA_miRNA.csv"), show_col_types = FALSE)
+````
+
+Combine with path to salmon quant
+```{r}
+samples <- sampInfo %>% 
+  mutate(StageType = paste0(Type, "_", Stage)) %>% 
+  left_join(data.frame(Filenames = list.files(here("data/analysis/mRNA/salmon_ZE"), recursive = TRUE, pattern = "quant.sf", full.names = TRUE)) %>% 
+              mutate(SampleID = basename(dirname(Filenames)) %>% gsub("_merged_sortmerna_trimmomatic","",.) %>% gsub("_S[0-9].*$","",.)),
+            by = "SampleID") %>% 
+  mutate(StageType = factor(StageType, levels = c(paste0("SD_",1:3),
+                                                  "ZE_4","FG_4",
+                                                  "ZE_5","FG_5",
+                                                  "ZE_6","FG_6",
+                                                  "ZE_7","FG_7",
+                                                  "ZE_8-9","FG_8-9",
+                                                  "ZE_10","FG_10")),
+         Stage = factor(as.character(Stage), levels = as.character(c(1:7,"8-9",10))))
+```
+
+<hr />
+&nbsp;
+
+# Sample overview
+
+Read the expression at the gene level
+````{r}
+txi <- suppressMessages(tximport(files = samples$Filenames,
+                                 type = "salmon",
+                                 tx2gene=tx2gene))
+counts <- txi$counts
+colnames(counts) <- samples$SampleID
+````
+
+Since the salmon quant file contains both genes and pseudogenes, I will plot per-gene mean expression of each category
+
+````{r}
+dat <- data.frame(value=log10(rowMeans(counts))) %>% 
+  rownames_to_column("id") %>% 
+  mutate(group = ifelse(grepl("^PA_",id),"gene","TEandPseudogene"))
+ggplot(dat, aes(x=value, group=group, col=group)) + 
+  geom_density(na.rm = TRUE) +
+  ggtitle("gene mean raw counts distribution") +
+  scale_x_continuous(name="per gene mean raw counts (log10)") + 
+  theme_bw()
+````
+
+`r emoji("point_right")` **The cumulative coverage on genes is as expected.**
+
+Per-sample plot
+````{r}
+dat <- as.data.frame(log10(counts)) %>% 
+  rownames_to_column("id") %>% 
+  mutate(group = ifelse(grepl("^PA_",id),"gene","TEandPseudogene")) %>% 
+  pivot_longer(cols = setdiff(colnames(.),c("id","group"))) %>% 
+  mutate(StageType=samples$StageType[match(name,samples$SampleID)])
+
+ggplot(dat,aes(x=value,group=name,col=StageType)) + 
+  geom_density(na.rm = TRUE) + 
+  facet_grid(row = vars(group), scale = "free") +
+  ggtitle("sample raw counts distribution") +
+  scale_x_continuous(name="per gene raw counts (log10)") + 
+  theme_bw()
+````
+
+All looks fine. I will remove pseudogene and TE out from the count table and skip most of BioQA since the quality of this data has been assessed multiple times already.
+````{r, warning=FALSE}
+dds <- DESeqDataSetFromTximport(
+  txi=txi,
+  colData = samples,
+  design = ~ StageType)
+
+colnames(dds) <- samples$SampleID
+
+dds <- dds[rownames(dds)[grepl("^PA_",rownames(dds))],colnames(dds)[!colnames(counts) == "P11562_112"]]
+
+saveRDS(dds,file=here("data/analysis/mRNA/flipComp_dds_spruce_ZE.rds"))
+````
+
+```{r}
+dds <- estimateSizeFactors(dds) %>% 
+  suppressMessages()
+
+vst <- assay(varianceStabilizingTransformation(dds, blind=TRUE))
+vst <- vst - min(vst)
+saveRDS(vst, here("data/analysis/mRNA/flipComp_mRNA_ZE_nonmodelaware-vst.rds"))
+
+boxplot(split(t(normalizationFactors(dds)),dds$StageType),las=2,
+        main="Sequencing libraries size factor by Stage")
+```
+
+````{r}
+pc <- prcomp(t(vst))
+percent <- round(summary(pc)$importance[2,]*100)
+
+p <- pca(vst,colData(dds))
+
+pc.dat <- bind_cols(PC1=pc$x[,1],
+                    PC2=pc$x[,2],
+                    PC3=pc$x[,3],
+                    PC4=pc$x[,4],
+                    PC5=pc$x[,5],
+                    PC6=pc$x[,6],
+                    PC7=pc$x[,7],
+                    PC8=pc$x[,8],
+                    PC9=pc$x[,9],
+                    PC10=pc$x[,10],
+                    as.data.frame(colData(dds)))
+````
+
+
+````{r, fig.width = 12, fig.height = 5}
+p1 <- ggplot(pc.dat, aes(x=PC1, y=PC2, fill=StageType)) + 
+  geom_point(size=5, shape = 21, color = "grey50", stroke = 0.5) + 
+  scale_fill_manual(values = anncol[["StageType"]]) +
+  ggtitle("Principal Component Analysis", subtitle="variance stabilized counts") +
+  xlab(paste0("PC1 (",percent[1],"%)")) +
+  ylab(paste0("PC2 (",percent[2],"%)")) +
+  theme_bw()
+
+p2 <- ggplot(pc.dat, aes(x=PC1, y=PC2, fill=Stage, shape=Type)) + 
+  geom_point(size=5, color = "grey50", stroke = 0.5) + 
+  scale_shape_manual(values = c("SD" = 21, "FG" = 22, "ZE" = 24)) +
+  ggtitle("Principal Component Analysis", subtitle="variance stabilized counts") +
+  xlab(paste0("PC1 (",percent[1],"%)")) +
+  ylab(paste0("PC2 (",percent[2],"%)")) +
+  theme_bw()
+
+p1 + p2
+````
+
+# Prepare data
+
+Make annotations
+```{r}
+annotCol <- samples %>% 
+  dplyr::select(StageType) %>% 
+  mutate(StageType = as.character(StageType)) %>% 
+  as.data.frame()
+rownames(annotCol) <- samples$SampleID
+```
+
+The comparison will be made between adjacent stages SD_1 vs SD_2, SD_2 vs SD_3, and so on. All comparisons are as follow
+```{r}
+comp <- list(
+  "SD2_vs_SD1"    = list(treatment = "SD_2"  , control = "SD_1"  ),
+  "SD3_vs_SD2"    = list(treatment = "SD_3"  , control = "SD_2"  ),
+  "ZE4_vs_SD3"    = list(treatment = "ZE_4"  , control = "SD_3"  ),
+  "ZE5_vs_ZE4"    = list(treatment = "ZE_5"  , control = "ZE_4"  ),
+  "ZE6_vs_ZE5"    = list(treatment = "ZE_6"  , control = "ZE_5"  ),
+  "ZE7_vs_ZE6"    = list(treatment = "ZE_7"  , control = "ZE_6"  ),
+  "ZE8-9_vs_ZE7"  = list(treatment = "ZE_8-9", control = "ZE_7"  ),
+  "ZE10_vs_ZE8-9" = list(treatment = "ZE_10" , control = "ZE_8-9"),
+  "FG4_vs_SD3"    = list(treatment = "FG_4"  , control = "SD_3"  ),
+  "FG5_vs_FG4"    = list(treatment = "FG_5"  , control = "FG_4"  ),
+  "FG6_vs_FG5"    = list(treatment = "FG_6"  , control = "FG_5"  ),
+  "FG7_vs_FG6"    = list(treatment = "FG_7"  , control = "FG_6"  ),
+  "FG8-9_vs_FG7"  = list(treatment = "FG_8-9", control = "FG_7"  ),
+  "FG10_vs_FG8-9" = list(treatment = "FG_10" , control = "FG_8-9"))
+knitr::kable(bind_rows(comp, .id = "comparison"))
+```
+
+# DEseq2 on mRNA
+
+## DE results and violin plots
+
+Here I will loop over all comparisons. The results will be filtered based on a FDR threshold of 0.01 and a minimum log2FC of 0.5.
+```{r, message=FALSE}
+resultsList <- comp %>%
+  map(unlist) %>%
+  imap(~ apply_extract_results(dds=dds, samples=samples,
+                               comparison=.x, default_prefix=.y,
+                               NameConditionColumn="StageType",
+                               variables_interest="StageType",
+                               lfc=0.5, padj=0.01, export=TRUE,
+                               default_dir=here("data/analysis/mRNA")))
+```
+
+## Other plots
+
+Pulling DE mRNAs ids and filter for genes (id starting with PA_)
+```{r}
+resultsNames <- resultsList %>% 
+  map(~ .x[["res"]]) %>% 
+  map(as.data.frame) %>% 
+  map(rownames_to_column, "id") %>% 
+  map(~ mutate(.x, sig = ifelse(is.na(padj),"ns",
+                         ifelse(padj < 0.01 & log2FoldChange > 0.5, "up",
+                         ifelse(padj < 0.01 & log2FoldChange < -0.5, "dn","ns"))))) %>%
+  map(~ split(.x, f=.x$sig)) %>%
+  map(~ map(.x, pull, "id")) %>%
+  map(discard_at, at = "ns") %>% 
+  transpose(.names = c("up","dn")) %>% 
+  map(~ map(.x, ~ .x[grepl("^PA_", .x)]))
+```
+
+Save data
+```{r}
+saveRDS(list("res" = resultsList,
+             "names" = resultsNames),
+        here("data/analysis/mRNA/flipComp_mRNA_ZE_ddsResults.rds"))
+```
+
+```{r, echo=FALSE, eva=FALSE}
+resultsNames <- list.files(here("data/analysis/mRNA"), pattern = "_genes.csv", full.names = TRUE) %>% 
+  .[!grepl("SE",basename(.), ignore.case = FALSE)] %>% 
+  map(read_csv,show_col_types = FALSE) %>% 
+  map(~ mutate(.x, sig = ifelse(is.na(padj),"ns",
+                         ifelse(padj < 0.01 & log2FoldChange > 0.5, "up",
+                         ifelse(padj < 0.01 & log2FoldChange < -0.5, "dn","ns"))))) %>%
+  map(~ split(.x, f=.x$sig)) %>%
+  map(~ map(.x, pull, `...1`)) %>%
+  map(discard_at, at = "ns") %>% 
+  transpose(.names = c("up","dn")) %>% 
+  map(~ map(.x, ~ .x[grepl("^PA_", .x)]))
+names(resultsNames[["up"]]) <- gsub("_genes.csv","",list.files(here("data/analysis/mRNA"), pattern = "_genes.csv")) %>% 
+  .[!grepl("SE",basename(.), ignore.case = FALSE)]
+names(resultsNames[["dn"]]) <- gsub("_genes.csv","",list.files(here("data/analysis/mRNA"), pattern = "_genes.csv")) %>% 
+  .[!grepl("SE",basename(.), ignore.case = FALSE)]
+```
+
+### Heatmaps of DE mRNAs
+
+These heatmaps are from non-model-aware vst-normalized expression values
+
+```{r}
+annotDE <- resultsNames %>%
+  map(map, as.data.frame) %>%
+  map(bind_rows, .id = "Comparison") %>% 
+  bind_rows(.id = "DE") %>% 
+  dplyr::rename(id = `.x[[i]]`) %>% 
+  split(., f = .$Comparison) %>% 
+  map(dplyr::select, -Comparison) %>% 
+  map(remove_rownames) %>%
+  map(column_to_rownames,"id")
+
+
+iwalk(annotDE, function(a,n){
+  if(nrow(a) == 1){
+    mat <- vst[rownames(vst) %in% rownames(a),] %>% 
+      t() %>% 
+      as.matrix()
+    rownames(mat) <- rownames(a)
+    
+    hm <- pheatmap(mat,
+                 color = viridis(20),
+                 annotation_col = annotCol,
+                 annotation_row = a,
+                 annotation_colors = anncol,
+                 border_color = NA,
+                 #cluster_cols = FALSE,
+                 cluster_rows = FALSE,
+                 show_rownames = FALSE,
+                 labels_col = samples$SampleName,
+                 angle_col = 90,
+                 legend = TRUE,
+                 main = paste0("non-modelaware vst: ", n))
+    hm
+  } else {
+    mat <- vst[rownames(vst) %in% rownames(a),]
+    
+    hm <- pheatmap(mat,
+                 color = viridis(20),
+                 annotation_col = annotCol,
+                 annotation_row = a,
+                 annotation_colors = anncol,
+                 border_color = NA,
+                 #cluster_cols = FALSE,
+                 show_rownames = FALSE,
+                 clustering_method = "ward.D2",
+                 labels_col = samples$SampleName,
+                 angle_col = 90,
+                 legend = TRUE,
+                 main = paste0("non-modelaware vst: ", n))
+    hm
+  }
+})
+```
+
+### Counts of DE mRNAs
+
+```{r}
+dat <- resultsNames %>% 
+  map(~ map(.x, length)) %>% 
+  map(bind_rows) %>%
+  map(t) %>% 
+  map(as.data.frame) %>% 
+  map(setNames, "Counts") %>% 
+  map(rownames_to_column, "Comparisons") %>% 
+  bind_rows(.id = "DE")
+
+dat$DE <- factor(dat$DE, levels = c("up","dn"))
+
+ggplot(dat, aes(x=DE, y=Counts, fill=DE)) +
+  geom_col() +
+  facet_grid(cols = vars(Comparisons)) +
+  scale_fill_manual(values = unlist(colorList)) +
+  ggtitle("DE mRNAs") +
+  theme_bw()
+```
+
+### Upset plots of DE mRNAs
+
+#### Up-regulated
+```{r}
+upset(fromList(resultsNames[["up"]]), sets = rev(names(comp)), order.by = "freq", nsets = 7, nintersects = NA, keep.order = TRUE)
+```
+
+#### Down-regulated
+```{r}
+upset(fromList(resultsNames[["dn"]]), sets = rev(names(comp)), order.by = "freq", nsets = 7, nintersects = NA, keep.order = TRUE)
+```
+
+
+#### Up and Down
+```{r, fig.width=15, fig.height=5}
+upsetList <- c(
+  setNames(resultsNames[["up"]],paste(names(resultsNames[["up"]]), "Up")),
+  setNames(resultsNames[["dn"]],paste(names(resultsNames[["dn"]]), "Down"))
+) %>% 
+  keep_at(., map_dbl(., ~ length(.x)) > 0)
+
+upset(fromList(upsetList), sets = rev(names(upsetList)), order.by = "freq", nsets = length(upsetList), nintersects = NA, keep.order = TRUE)
+```
+
+### Jaccard Index
+
+Jaccard Index is count of intersection divide by count of the union. This will normalize by the number of members in each set
+```{r}
+dat <- c(
+  setNames(resultsNames[["up"]],paste(names(resultsNames[["up"]]), "Up")),
+  setNames(resultsNames[["dn"]],paste(names(resultsNames[["dn"]]), "Down")))
+
+mat <- matrix(data=0,nrow=length(dat),ncol=length(dat),dimnames = list(names(dat),names(dat)))
+
+for(i in 1:length(dat)){
+  for(j in 1:length(dat)){
+    rn <- rownames(mat)[i]
+    cn <- colnames(mat)[j]
+    
+    nIntersect <- intersect(dat[[rn]],dat[[cn]])
+    nUnion <- union(dat[[rn]],dat[[cn]])
+    
+    mat[i,j] <- length(nIntersect)/length(nUnion)
+    }
+}
+
+pheatmap(mat,
+         cluster_rows = F,
+         cluster_cols = F,
+         display_numbers = T,
+         number_format = "%.2f",
+         main = "Jaccard index of DE mRNAs")
+```
+
+# Session Info
+
+````{r session info, echo=FALSE}
+sessionInfo()
+````
+

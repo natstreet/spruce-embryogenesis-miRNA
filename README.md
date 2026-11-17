@@ -28,6 +28,12 @@ for predicted miRNA-target pairs, and run Gene Ontology (GO) enrichment of the s
   tables that the figure scripts read). `FILE_DESCRIPTIONS.txt` in the archive describes every file.
 - **Raw sequencing reads**: European Nucleotide Archive (ENA), accession PRJEB72619.
 
+## Processing of the raw reads
+The folder `upstream/` holds the scripts that processed the raw reads into the deposited inputs
+(read trimming, miRNA prediction and annotation, the replicate check, counting, target prediction and
+mRNA quantification). They were run on a computing cluster and are provided as run; see
+`upstream/README.md`.
+
 ## Software
 All scripts were run with R 4.4.3 and Bioconductor 3.20. `environment.yml` lists the exact package
 versions. To create the environment with conda or mamba:

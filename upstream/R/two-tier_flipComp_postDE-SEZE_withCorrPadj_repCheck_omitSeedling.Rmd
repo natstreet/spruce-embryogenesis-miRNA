@@ -1,0 +1,1415 @@
+---
+title: "Spruce SE/ZE miRNA target prediction and expression correlation (filpComp ver.)"
+author: "Theerarat Kochakarn"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_width: 12
+    fig_height: 9
+    toc: true
+    number_sections: true
+    toc_depth: 6
+    toc_float:
+      collapsed: FALSE
+      smooth_scroll: TRUE
+    code_folding: hide
+    theme: "flatly"
+    highlight: pygments
+  # includes:
+  #   before_body: header.html
+  #   after_body: footer.html
+  # css: style.css
+---
+
+````{r opts, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+````
+
+# Setup
+
+* Libraries
+
+````{r library,results='hide',warning=FALSE,message=FALSE}
+library(data.table)
+library(emoji)
+library(gplots)
+library(here)
+library(DESeq2)
+library(RColorBrewer)
+library(tidyverse)
+library(ggVennDiagram)
+library(pheatmap)
+library(UpSetR)
+library(viridis)
+library(future.apply)
+library(patchwork)
+````
+
+* Helper files
+
+````{r message=FALSE}
+source("~/git/UPSCb-common/src/R/topGoUtilities.R")
+````
+
+* Color schemes
+
+````{r }
+pal=brewer.pal(8,"Dark2")
+hpal <- colorRampPalette(c("blue","white","red"))(100)
+mar <- par("mar")
+colorList <- list("all" = "purple","up" = "red","dn" = "blue")
+
+anncol = list("plant" = c("nonplant" = "#D95F02","plant" = "#1B9E77"),
+              "known" = c("known" = "#8DD3C7", "variant" = "#BEBADA", "novel" = "#FFFFB3"),
+              "sizeFactor" = colorRampPalette(brewer.pal(9,"RdPu"))(20),
+              "DE" = c("up" = "red","dn" = "blue"),
+              "StageType" = c(
+                setNames(brewer.pal(7,"Greens")[2:7],paste0("SE_",1:6)),
+                setNames(brewer.pal(9,"Purples")[2:4],paste0("SD_",1:3)),
+                setNames(brewer.pal(9,"Blues")[4:9],paste0("ZE_",c(4:7,"8-9",10))),
+                setNames(brewer.pal(9,"Reds")[4:9],paste0("FG_",c(4:7,"8-9",10)))))
+````
+
+* Sample information
+
+Samples for miRNA analysis
+```{r}
+lowQual <- c("PabK14-03SM_SR1","PabK14-03RO_SR2","Pab738_2_FMG_MIR1")
+
+samples <- bind_rows(
+  read_tsv(here("doc/metadata_SE.tsv"), show_col_types=F) %>%
+    dplyr::filter(! grepl("-unk",stage)) %>% 
+    dplyr::rename(sample = NGI_ID,
+                  sampleName = User_ID) %>%
+    mutate(temp = gsub("PabK14-03","",sampleName),
+           Stage = gsub("-unk","",stage)) %>%
+    separate_wider_delim(temp, delim = "_", names = c("SampleType","rep")) %>%
+    mutate(Dataset = "SE",
+           Type = "SE",
+           StageType = gsub("S","SE_",Stage),
+           Replicate = substr(rep,3,3),
+           SampleName = paste0(Stage,"-",SampleType,"-",Replicate)) %>% 
+    dplyr::select(-stage, -Mreads, -`>=Q30`, -Status, -rep, -replicate) %>% 
+    dplyr::filter(Stage %in% paste0("S",1:6)),
+  read_csv(here("doc/metadataZE_mRNA_miRNA.csv"), show_col_types = FALSE) %>% 
+    dplyr::filter(! is.na(miR_NGI_ID)) %>% 
+    mutate(StageType = paste0(Type, "_", Stage),
+           Stage = paste0("Z",Stage)) %>% 
+    mutate(StageType = factor(StageType, levels = c(paste0("SD_",1:3),
+                                                    "ZE_4","FG_4",
+                                                    "ZE_5","FG_5",
+                                                    "ZE_6","FG_6",
+                                                    "ZE_7","FG_7",
+                                                    "ZE_8-9","FG_8-9",
+                                                    "ZE_10","FG_10")),
+           Stage = factor(as.character(Stage), levels = paste0("Z",as.character(c(1:7,"8-9",10)))),
+           Dataset = "ZE") %>% 
+    dplyr::select(-SampleID, -lincRNA_ID) %>% 
+    dplyr::rename(sample = miR_NGI_ID,
+                  sampleName = miR_User_ID,
+                  description = SampleDescription)) %>% 
+  mutate(StageType = factor(StageType,
+                        levels = c(
+                          paste0("SE_",1:6),
+                          paste0("SD_",1:3),
+                          paste0("ZE_",c(4:7,"8-9",10)),
+                          paste0("FG_",c(4:7,"8-9",10)))),
+         Stage = factor(Stage, levels = c(paste0("S",1:6),paste0("Z",c(1:7,"8-9",10))))) %>% 
+  dplyr::filter(! sampleName %in% lowQual)
+```
+
+* miRNA predictions
+
+```{r}
+mature <- seqinr::read.fasta(here("data/analysis/results/Picea_mature.fa"), seqtype = "DNA", as.string = T, forceDNAtolower = F)
+matureSeq <- map(mature, as.character)
+matureDF <- as.data.frame(matureSeq) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("id") %>%
+  dplyr::rename(mature = V1)
+
+# passed_plant_criteria <- map(list.files(here("data/analysis/analysis/results"), full.names = T, recursive = T, pattern = "filter_P_prediction$"),
+#     read_tsv, show_col_type = F, col_names = c("chr","strand","read","name","coord1","coord2","mature","precurser")) %>%
+#   setNames(list.files(here("data/analysis/analysis/results"), full.names = F, recursive = T, pattern = "filter_P_prediction$") %>%
+#              dirname() %>% gsub(".fq.gz.dedup","",.)) %>%
+#   map(left_join,matureDF,by = "mature")
+# saveRDS(passed_plant_criteria, here("data/analysis/results/passed_plant_criteria.rds"))
+passed_plant_criteria <- readRDS(here("data/analysis/results/passed_plant_criteria.rds"))
+
+passed_plant_criteria_id <- passed_plant_criteria %>%
+  map(function(d){
+    keep_at(matureSeq, at = matureSeq %in% d$mature)
+  }) %>%
+  map(names)
+
+mature_plant <- keep_at(matureSeq, at = unique(unlist(passed_plant_criteria_id, use.names = F)))
+```
+
+* miRNAs that pass replicate checked
+```{r}
+repChecked <- read_lines(here("data/analysis/results/repChecked.txt"))
+```
+
+* Annotation with more miR databases (miRBase, PMRD, PmiREN)
+```{r}
+# mature_blast <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_blastn_250_parsed.txt"), show_col_types = F)
+# knownList <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_known.txt"), 
+#                       show_col_types = FALSE, col_names = colnames(mature_blast))
+# variantList <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_variant.txt"), 
+#                         show_col_types = FALSE, col_names = colnames(mature_blast)) %>% 
+#   filter(!Query_acc %in% knownList$Query_acc)
+# 
+# knownList %>% 
+#   select(Query_acc, `Hit name`, Description) %>% 
+#   mutate(Description = gsub("&$", "", Description)) %>% 
+#   write_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_knownID.txt"), col_names = FALSE)
+# 
+# dat <- variantList %>% 
+#   split(., .$Query_acc) %>% 
+#   map(slice_max, `Query cover`*`Hit cover`*(Identity/100))
+# 
+# full_join(
+#   dat %>% map(pull, `Hit name`) %>% 
+#     map(paste, collapse = "|") %>% 
+#     map(as.data.frame) %>% 
+#     bind_rows(.id = "miRNA"),
+#   dat %>% map(pull, Description) %>% 
+#     map(~ gsub("&$", "", .x)) %>% 
+#     map(paste, collapse = "|") %>% 
+#     map(as.data.frame) %>% 
+#     bind_rows(.id = "miRNA"), 
+#   by = "miRNA") %>% 
+#   write_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_variantID.txt"), col_names = FALSE)
+
+mature_known <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_knownID.txt"), show_col_types = FALSE, col_names = FALSE)$X1
+mature_variant <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_variantID.txt"), show_col_types = FALSE, col_names = FALSE)$X1
+mature_refs <- bind_rows(
+  read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_knownID.txt"), show_col_types = FALSE, col_names = FALSE),
+  read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_variantID.txt"), show_col_types = FALSE, col_names = FALSE)) %>% 
+  setNames(c("id","refid","Description"))
+```
+
+Make annotation for miRNAs
+```{r}
+annotRow <- data.frame("id" = names(mature)) %>%
+  mutate(plant = ifelse(id %in% names(mature_plant), "plant", "nonplant"),
+         known = ifelse(id %in% mature_known, "known",
+                        ifelse(id %in% mature_variant, "variant", "novel"))) %>%
+  dplyr::select(id,plant,known)
+```
+
+<hr />
+&nbsp;
+
+# Export data
+
+Write DE results
+```{r}
+readRDS(here("data/analysis/results/flipComp_1stTier_finalSE_ddsResults.rds"))[["res"]] %>% 
+  map(as.data.frame) %>% 
+  map(rownames_to_column, "miR") %>% 
+  iwalk(~ write_csv(.x, here(paste0("data/analysis/results/",.y,"_miRresults.csv"))))
+
+readRDS(here("data/analysis/results/flipComp_1stTier_finalZE_ddsResults.rds"))[["res"]] %>% 
+  map(as.data.frame) %>% 
+  map(rownames_to_column, "miR") %>% 
+  iwalk(~ write_csv(.x, here(paste0("data/analysis/results/",.y,"_miRresults.csv"))))
+```
+
+Export dataset-specific vst
+```{r}
+dds <- estimateSizeFactors(readRDS(file=here("data/analysis/results/ddsFinal.rds"))[,samples$SampleName[samples$Stage %in% paste0("S",1:6)]]) %>% 
+  suppressMessages()
+colnames(dds) <- samples$sampleName[samples$Dataset == "SE"]
+vst <- assay(varianceStabilizingTransformation(dds, blind=TRUE))
+vst <- vst - min(vst)
+saveRDS(vst, here("data/analysis/results/miRNA_SE_nonmodelaware-vst.rds"))
+
+dds <- estimateSizeFactors(readRDS(file=here("data/analysis/results/ddsFinal.rds"))[,samples$SampleName[samples$Dataset == "ZE"]]) %>% 
+  suppressMessages()
+colnames(dds) <- samples$sampleName[samples$Dataset == "ZE"]
+vst <- assay(varianceStabilizingTransformation(dds, blind=TRUE))
+vst <- vst - min(vst)
+saveRDS(vst, here("data/analysis/results/miRNA_ZE_nonmodelaware-vst.rds"))
+
+remove(dds,vst)
+```
+
+# Target prediction (all miRs)
+
+Following programs will be used to predict targets against longest transcript of each gene in PA v2.0
+
+* *psRNATarget* https://www.zhaolab.org/psRNATarget/analysis?function=3 , here we keep target pairs with expectation score <= 5 (default)
+
+* *psRobot* v1.2 http://omicslab.genetics.ac.cn/psRobot/downloads.php
+
+* *tapir* https://github.com/erbon7/tapir
+
+* *TargetFinder* https://github.com/carringtonlab/TargetFinder
+
+All tools except psRNATarget were run locally using default parameters. psRNATarget was on the webserver and also run with default parameters.
+
+## psRNATarget
+```{r}
+targetsPT <- read_tsv(list.files(here("data/analysis/results/targetPrediction_all"),
+                                 pattern = "psRNATarget", full.names = TRUE),
+                      show_col_types = FALSE, comment = "#") %>% 
+  dplyr::filter(miRNA_Acc. %in% repChecked)
+
+ggplot(targetsPT, aes(x=Expectation)) +
+  geom_histogram(binwidth = 0.5) +
+  scale_x_continuous(breaks = c(0,0.5,1,1.5,2,2.5,3,3.5,4,4.5,5)) +
+  ggtitle("psRNATarget Expectation score of miRNA-mRNA pairs") +
+  theme_bw()
+```
+
+## TargetFinder
+```{r}
+targetsTF <- list.files(here("data/analysis/results/targetPrediction_all/TargetFinder"),full.names = TRUE) %>%
+  map(~ grep("^query=", readLines(.x), value = TRUE)) %>%
+  discard_at(map_dbl(.,length) == 0) %>%
+  map(function(l){
+    strsplit(l, ",\\s*") %>%
+      map(function(v){
+        kv_pairs <- sapply(v, function(x) strsplit(x, "=")[[1]])
+        keys <- sapply(kv_pairs, `[`, 1)
+        values <- sapply(kv_pairs, `[`, 2)
+        names(values) <- keys
+        return(values)
+      }) %>%
+      bind_rows()
+  }) %>% 
+  bind_rows() %>% 
+  mutate(score = as.numeric(score)) %>% 
+  dplyr::filter(query %in% repChecked)
+
+ggplot(targetsTF, aes(x=score)) +
+  geom_histogram(binwidth = 0.5) +
+  scale_x_continuous(breaks = c(0,0.5,1,1.5,2,2.5,3,3.5,4)) +
+  ggtitle("TargetFinder score of miRNA-mRNA pairs") +
+  theme_bw()
+```
+
+## psRobot
+```{r}
+targetsPR <- list.files(here("data/analysis/results/targetPrediction_all/PSROBOT"),full.names = TRUE) %>%
+  map(~ grep("^>", readLines(.x), value = TRUE)) %>%
+  unlist(use.names = FALSE) %>% 
+  map(strsplit, split= "\t") %>%
+  unlist(recursive = FALSE, use.names = FALSE) %>% 
+  map(setNames,c("miRNA","score","target")) %>% 
+  bind_rows() %>% 
+  mutate(miRNA = gsub(">","",miRNA),
+         score = as.numeric(gsub("Score: ","", score)),
+         target = gsub(" gene=.*","",target)) %>% 
+  dplyr::filter(miRNA %in% repChecked)
+
+ggplot(targetsPR, aes(x=score)) +
+  geom_histogram(binwidth = 0.25) +
+  scale_x_continuous(breaks = c(0,0.5,1,1.5,2,2.5)) +
+  ggtitle("psRobot score of miRNA-mRNA pairs") +
+  theme_bw()
+```
+
+## TAPIR fasta
+```{r}
+targetsTPf <- list.files(here("data/analysis/results/targetPrediction_all/TAPIRfasta"),
+                         pattern = ".txt", full.names = TRUE, recursive = TRUE) %>%
+  map(function(f){
+    lines <- readLines(f)
+    data.frame(miRNA = grep("^miRNA ", lines, value = TRUE),
+               target = grep("^target ", lines, value = TRUE),
+               score = grep("^score ", lines, value = TRUE),
+               mfe_ratio = grep("^mfe_ratio ", lines, value = TRUE))}) %>%
+  bind_rows() %>% 
+  mutate(miRNA = gsub("miRNA *","",miRNA),
+         target = gsub("target *","",target),
+         score = as.numeric(gsub("score *","",score)),
+         mfe_ratio = as.numeric(gsub("mfe_ratio *","",mfe_ratio))) %>% 
+  dplyr::filter(miRNA %in% repChecked)
+
+ggplot(targetsTPf, aes(x=score)) +
+  geom_histogram(binwidth = 0.5) +
+  scale_x_continuous(breaks = c(0,0.5,1,1.5,2,2.5,3,3.5)) +
+  ggtitle("TAPIR fasta score of miRNA-mRNA pairs") +
+  theme_bw()
+
+ggplot(targetsTPf, aes(x=mfe_ratio)) +
+  geom_histogram(binwidth = 0.01) +
+  ggtitle("TAPIR fasta minimum free energy ratio of miRNA-mRNA pairs") +
+  theme_bw()
+
+ggplot(targetsTPf, aes(x=mfe_ratio, y=score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  ggtitle("TAPIR fasta minimum free energy ratio vs score of miRNA-mRNA pairs") +
+  theme_bw()
+```
+
+The pairs with lower score has higher free energy ratio as expected.
+
+## TAPIR hybrid
+```{r}
+targetsTPh <- list.files(here("data/analysis/results/targetPrediction_all/TAPIRhybrid"),
+                         pattern = ".txt", full.names = TRUE, recursive = TRUE) %>%
+  map(function(f){
+    lines <- readLines(f)
+    data.frame(miRNA = grep("^miRNA ", lines, value = TRUE),
+               target = grep("^target ", lines, value = TRUE),
+               score = grep("^score ", lines, value = TRUE),
+               mfe_ratio = grep("^mfe_ratio ", lines, value = TRUE))}) %>%
+  bind_rows() %>% 
+  mutate(miRNA = gsub("miRNA *","",miRNA),
+         target = gsub("target *","",target),
+         score = as.numeric(gsub("score *","",score)),
+         mfe_ratio = as.numeric(gsub("mfe_ratio *","",mfe_ratio))) %>% 
+  distinct() %>% 
+  dplyr::filter(miRNA %in% repChecked)
+
+ggplot(targetsTPh, aes(x=score)) +
+  geom_histogram(binwidth = 0.5) +
+  scale_x_continuous(breaks = c(0,0.5,1,1.5,2,2.5,3,3.5,4.0)) +
+  ggtitle("TAPIR hybrid score of miRNA-mRNA pairs") +
+  theme_bw()
+
+ggplot(targetsTPh, aes(x=mfe_ratio)) +
+  geom_histogram(binwidth = 0.01) +
+  ggtitle("TAPIR hybrid minimum free energy ratio of miRNA-mRNA pairs") +
+  theme_bw()
+
+ggplot(targetsTPh, aes(x=mfe_ratio, y=score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  ggtitle("TAPIR hybrid minimum free energy ratio vs score of miRNA-mRNA pairs") +
+  theme_bw()
+```
+
+The pairs with lower score has higher free energy ratio as expected.
+
+## Compare scores
+
+```{r}
+dat <- inner_join(targetsPT %>% 
+                    dplyr::rename(psRNATarget_Expectation = Expectation,
+                                  miRNA = miRNA_Acc.,
+                                  target = Target_Acc.),
+                  targetsTF %>% 
+                    dplyr::rename(targetFinder_score = score,
+                                  miRNA = query) %>% 
+                    mutate(target = gsub(" gene", "", target)),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=psRNATarget_Expectation, y=targetFinder_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsPT %>% 
+                    dplyr::rename(psRNATarget_Expectation = Expectation,
+                                  miRNA = miRNA_Acc.,
+                                  target = Target_Acc.),
+                  targetsPR %>% 
+                    dplyr::rename(psRobot_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=psRNATarget_Expectation, y=psRobot_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsPT %>% 
+                    dplyr::rename(psRNATarget_Expectation = Expectation,
+                                  miRNA = miRNA_Acc.,
+                                  target = Target_Acc.),
+                  targetsTPf %>% 
+                    dplyr::rename(TAPIRfasta_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=psRNATarget_Expectation, y=TAPIRfasta_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsPT %>% 
+                    dplyr::rename(psRNATarget_Expectation = Expectation,
+                                  miRNA = miRNA_Acc.,
+                                  target = Target_Acc.),
+                  targetsTPh %>% 
+                    dplyr::rename(TAPIRhybrid_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=psRNATarget_Expectation, y=TAPIRhybrid_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsTF %>% 
+                    dplyr::rename(targetFinder_score = score,
+                                  miRNA = query) %>% 
+                    mutate(target = gsub(" gene", "", target)),
+                  targetsPR %>% 
+                    dplyr::rename(psRobot_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=targetFinder_score, y=psRobot_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsTF %>% 
+                    dplyr::rename(targetFinder_score = score,
+                                  miRNA = query) %>% 
+                    mutate(target = gsub(" gene", "", target)),
+                  targetsTPf %>% 
+                    dplyr::rename(TAPIRfasta_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=targetFinder_score, y=TAPIRfasta_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsTF %>% 
+                    dplyr::rename(targetFinder_score = score,
+                                  miRNA = query) %>% 
+                    mutate(target = gsub(" gene", "", target)),
+                  targetsTPh %>% 
+                    dplyr::rename(TAPIRhybrid_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=targetFinder_score, y=TAPIRhybrid_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsPR %>% 
+                    dplyr::rename(psRobot_score = score),
+                  targetsTPf %>% 
+                    dplyr::rename(TAPIRfasta_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=psRobot_score, y=TAPIRfasta_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsPR %>% 
+                    dplyr::rename(psRobot_score = score),
+                  targetsTPh %>% 
+                    dplyr::rename(TAPIRhybrid_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=psRobot_score, y=TAPIRhybrid_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+```{r}
+dat <- inner_join(targetsTPf %>% 
+                    dplyr::rename(TAPIRfasta_score = score),
+                  targetsTPh %>% 
+                    dplyr::rename(TAPIRhybrid_score = score),
+                  by = c("miRNA","target"), relationship = "many-to-many")
+
+ggplot(dat, aes(x=TAPIRfasta_score, y=TAPIRhybrid_score)) +
+  geom_density_2d_filled() +
+  geom_smooth(colour = "red") +
+  theme_bw()
+```
+
+for psRNATarget, it looks like score <= 3.0 yeild approximately linear relationship with the score predicted by other programs.
+
+## Combine
+
+I will take all predicted pairs from default params of all programs
+```{r}
+targetsAll <- targetsPT %>% 
+  dplyr::rename(psRNATarget_Expectation = Expectation,
+                miRNA = miRNA_Acc.,
+                target = Target_Acc.) %>% 
+  dplyr::select(miRNA,target,psRNATarget_Expectation) %>% 
+  full_join(targetsTF %>% 
+              dplyr::rename(targetFinder_score = score,
+                            miRNA = query) %>% 
+              mutate(target = gsub(" gene", "", target)) %>% 
+              dplyr::select(miRNA,target,targetFinder_score), 
+            by = c("miRNA","target"), relationship = "many-to-many") %>%
+  full_join(targetsTPf %>% 
+              dplyr::rename(TAPIRfasta_score = score) %>% 
+              dplyr::select(miRNA,target,TAPIRfasta_score), 
+            by = c("miRNA","target"), relationship = "many-to-many") %>%
+  full_join(targetsTPh %>% 
+              dplyr::rename(TAPIRhybrid_score = score) %>% 
+              dplyr::select(miRNA,target,TAPIRhybrid_score), 
+            by = c("miRNA","target"), relationship = "many-to-many") %>%
+  full_join(targetsPR %>% 
+              dplyr::rename(psRobot_score = score), 
+            by = c("miRNA","target"), relationship = "many-to-many") %>%
+  mutate(NumberOfPrograms = 4 - (is.na(psRNATarget_Expectation) + is.na(targetFinder_score) + (is.na(TAPIRfasta_score) & is.na(TAPIRhybrid_score)) + is.na(psRobot_score)))
+
+dat <- targetsAll %>% 
+  mutate(pairID = paste0(miRNA,target))
+
+pairList <- list(
+  "psRNAtarget" = unique(dat$pairID[! is.na(dat$psRNATarget_Expectation)]),
+  "TargetFinder" = unique(dat$pairID[! is.na(dat$targetFinder_score)]),
+  "TAPIR" = unique(dat$pairID[! (is.na(dat$TAPIRfasta_score) & is.na(dat$TAPIRhybrid_score))]),
+  "PSROBOT" = unique(dat$pairID[! is.na(dat$psRobot_score)]))
+
+ggVennDiagram(pairList, label_alpha = 0, label = "count") + 
+  scale_fill_gradient(low="white",high = "dodgerblue") + 
+  scale_x_continuous(expand = expansion(mult = .1))
+
+pairList <- list(
+  "psRNAtarget" = unique(dat$pairID[! is.na(dat$psRNATarget_Expectation)]),
+  "TargetFinder" = unique(dat$pairID[! is.na(dat$targetFinder_score)]),
+  "TAPIRfasta" = unique(dat$pairID[! is.na(dat$TAPIRfasta_score)]),
+  "TAPIRhybrid" = unique(dat$pairID[! is.na(dat$TAPIRhybrid_score)]),
+  "PSROBOT" = unique(dat$pairID[! is.na(dat$psRobot_score)]))
+
+upset(fromList(pairList),nsets = 5, nintersects = NA)
+ggVennDiagram(discard_at(pairList,"psRNAtarget"), label_alpha = 0, label = "count") + 
+  scale_fill_gradient(low="white",high = "dodgerblue") + 
+  scale_x_continuous(expand = expansion(mult = .1))
+```
+
+psRNAtarget gives substantial amount of unique predictions.
+
+<details><summary>Test psRNAtarget expectation score threshold</summary>
+```{r}
+## Expectation 4.0
+dat <- targetsAll %>% 
+  mutate(psRNATarget_Expectation = ifelse(psRNATarget_Expectation > 4.0,NA,psRNATarget_Expectation)) %>% 
+  mutate(pairID = paste0(miRNA,target))
+
+list(
+  "psRNAtarget(4.0)" = unique(dat$pairID[! is.na(dat$psRNATarget_Expectation)]),
+  "TargetFinder" = unique(dat$pairID[! is.na(dat$targetFinder_score)]),
+  "TAPIR" = unique(dat$pairID[! (is.na(dat$TAPIRfasta_score) & is.na(dat$TAPIRhybrid_score))]),
+  "PSROBOT" = unique(dat$pairID[! is.na(dat$psRobot_score)])) %>% 
+  ggVennDiagram(label_alpha = 0, label = "count") + 
+    scale_fill_gradient(low="white",high = "dodgerblue") + 
+    scale_x_continuous(expand = expansion(mult = .1))
+
+## Expectation 3.0
+dat <- targetsAll %>% 
+  mutate(psRNATarget_Expectation = ifelse(psRNATarget_Expectation > 3.0,NA,psRNATarget_Expectation)) %>% 
+  mutate(pairID = paste0(miRNA,target))
+
+list(
+  "psRNAtarget(3.0)" = unique(dat$pairID[! is.na(dat$psRNATarget_Expectation)]),
+  "TargetFinder" = unique(dat$pairID[! is.na(dat$targetFinder_score)]),
+  "TAPIR" = unique(dat$pairID[! (is.na(dat$TAPIRfasta_score) & is.na(dat$TAPIRhybrid_score))]),
+  "PSROBOT" = unique(dat$pairID[! is.na(dat$psRobot_score)])) %>% 
+  ggVennDiagram(label_alpha = 0, label = "count") + 
+    scale_fill_gradient(low="white",high = "dodgerblue") + 
+    scale_x_continuous(expand = expansion(mult = .1))
+
+## Expectation 2.0
+dat <- targetsAll %>% 
+  mutate(psRNATarget_Expectation = ifelse(psRNATarget_Expectation > 2.0,NA,psRNATarget_Expectation)) %>% 
+  mutate(pairID = paste0(miRNA,target))
+
+list(
+  "psRNAtarget(2.0)" = unique(dat$pairID[! is.na(dat$psRNATarget_Expectation)]),
+  "TargetFinder" = unique(dat$pairID[! is.na(dat$targetFinder_score)]),
+  "TAPIR" = unique(dat$pairID[! (is.na(dat$TAPIRfasta_score) & is.na(dat$TAPIRhybrid_score))]),
+  "PSROBOT" = unique(dat$pairID[! is.na(dat$psRobot_score)])) %>% 
+  ggVennDiagram(label_alpha = 0, label = "count") + 
+    scale_fill_gradient(low="white",high = "dodgerblue") + 
+    scale_x_continuous(expand = expansion(mult = .1))
+
+## Expectation 1.0
+dat <- targetsAll %>% 
+  mutate(psRNATarget_Expectation = ifelse(psRNATarget_Expectation > 1.0,NA,psRNATarget_Expectation)) %>% 
+  mutate(pairID = paste0(miRNA,target))
+
+list(
+  "psRNAtarget(1.0)" = unique(dat$pairID[! is.na(dat$psRNATarget_Expectation)]),
+  "TargetFinder" = unique(dat$pairID[! is.na(dat$targetFinder_score)]),
+  "TAPIR" = unique(dat$pairID[! (is.na(dat$TAPIRfasta_score) & is.na(dat$TAPIRhybrid_score))]),
+  "PSROBOT" = unique(dat$pairID[! is.na(dat$psRobot_score)])) %>% 
+  ggVennDiagram(label_alpha = 0, label = "count") + 
+    scale_fill_gradient(low="white",high = "dodgerblue") + 
+    scale_x_continuous(expand = expansion(mult = .1))
+```
+
+The lowest threshold that does not compromise the number of pairs supported by 3 programs too much here is 3.0.
+
+</details>
+
+Number of miRNA-target pairs predicted by 1, 2, 3 and 4 programs:
+```{r}
+dat <- targetsAll %>% 
+  dplyr::select(miRNA,target, NumberOfPrograms) %>% 
+  distinct()
+table(dat$NumberOfPrograms)
+```
+
+Save table
+```{r}
+write_tsv(targetsAll, here("data/analysis/results/targetPrediction_all/predictionAll.tsv"))
+```
+
+We will choose miRNA-target pairs that are predicted by at least 3 programs for further analysis.
+```{r}
+targetPairs <- targetsAll %>%
+  dplyr::filter(NumberOfPrograms >= 3) %>%
+  dplyr::select(miRNA,target,NumberOfPrograms) %>% 
+  distinct()
+```
+
+Number of pairs: `r nrow(targetPairs)`
+
+Number of miRNAs: `r length(unique(targetPairs$miRNA))`
+
+Number of targets: `r length(unique(targetPairs$target))`
+
+# Combining with DE results
+
+We check if the pairs show up as DE from both miRNA and mRNA comparisons on the different direction. Here we will also check if the pairs show up as DE in the same direction in any comparisons, and remove such pairs.
+
+First, we load up the DEG lists.
+```{r}
+resSEm <- readRDS(here("data/analysis/mRNA/flipComp_mRNA_SE_ddsResults_omitSeedling.rds"))[["names"]]
+resZEm <- readRDS(here("data/analysis/mRNA/flipComp_mRNA_ZE_ddsResults.rds"))[["names"]]
+resSEmi <- readRDS(here("data/analysis/results/flipComp_1stTier_finalSE_ddsResults.rds"))[["names"]]
+resZEmi <- readRDS(here("data/analysis/results/flipComp_1stTier_finalZE_ddsResults.rds"))[["names"]]
+```
+
+Then we check if the mi and target belong to any DE comparison
+```{r, eval=FALSE}
+dat <- targetPairs %>% 
+  dplyr::filter(miRNA %in% c(unlist(resSEmi),unlist(resZEmi))) %>% 
+  mutate(target = strsplit(target, split = ".", fixed = TRUE) %>% map_chr(~ .x[[1]])) %>% 
+  mutate(
+    miRNA_upDE = map(miRNA, function(mi){
+      x <- names(resZEmi[["up"]])[map_lgl(resZEmi[["up"]], ~ mi %in% .x)]
+      y <- names(resSEmi[["up"]])[map_lgl(resSEmi[["up"]], ~ mi %in% .x)]
+      return(unique(c(x,y)))}),
+    miRNA_dnDE = map(miRNA, function(mi){
+      x <- names(resZEmi[["dn"]])[map_lgl(resZEmi[["dn"]], ~ mi %in% .x)]
+      y <- names(resSEmi[["dn"]])[map_lgl(resSEmi[["dn"]], ~ mi %in% .x)]
+      return(unique(c(x,y)))}),
+    mRNA_upDE = map(target, function(m){
+      x <- names(resZEm[["up"]])[map_lgl(resZEm[["up"]], ~ m %in% .x)]
+      y <- names(resSEm[["up"]])[map_lgl(resSEm[["up"]], ~ m %in% .x)]
+      return(unique(c(x,y)))}),
+    mRNA_dnDE = map(target, function(m){
+      x <- names(resZEm[["dn"]])[map_lgl(resZEm[["dn"]], ~ m %in% .x)]
+      y <- names(resSEm[["dn"]])[map_lgl(resSEm[["dn"]], ~ m %in% .x)]
+    return(unique(c(x,y)))}))
+
+dat2 <- dat %>% 
+  rowwise() %>% 
+  mutate(miRNA_up_mRNA_dn = ifelse(length(miRNA_upDE) > 0 & length(mRNA_dnDE) > 0,
+                                   intersect(miRNA_upDE, mRNA_dnDE),NA),
+         miRNA_dn_mRNA_up = ifelse(length(miRNA_dnDE) > 0 & length(mRNA_upDE) > 0,
+                                   intersect(miRNA_dnDE, mRNA_upDE),NA),
+         miRNA_up_mRNA_up = ifelse(length(miRNA_upDE) > 0 & length(mRNA_upDE) > 0,
+                                   intersect(miRNA_upDE, mRNA_upDE),NA),
+         miRNA_dn_mRNA_dn = ifelse(length(miRNA_dnDE) > 0 & length(mRNA_dnDE) > 0,
+                                   intersect(miRNA_dnDE, mRNA_dnDE),NA))
+saveRDS(dat2, here("data/analysis/results/flipComp_1stTier_TargetPairs_finalMetadata_DEdirections_tempB4filter.rds"))
+```
+
+```{r}
+dat2 <- readRDS(here("data/analysis/results/flipComp_1stTier_TargetPairs_finalMetadata_DEdirections_tempB4filter.rds"))
+
+targetPairsDE <- dat2 %>% 
+  rowwise() %>% 
+  dplyr::filter(!is.na(miRNA_up_mRNA_dn) | !is.na(miRNA_dn_mRNA_up)) %>% 
+  #dplyr::filter(is.na(miRNA_up_mRNA_up) & is.na(miRNA_dn_mRNA_dn)) %>% 
+  mutate(selComp =  paste(c(na.omit(miRNA_up_mRNA_dn), na.omit(miRNA_dn_mRNA_up)), collapse = ",")) %>% 
+  ungroup()
+
+saveRDS(targetPairsDE, here("data/analysis/results/flipComp_1stTier_TargetPairs_finalMetadata_DEdirections.rds"))
+```
+
+Among `r nrow(dat2)` pairs that are predicted for DE miRNAs, `r sum(!is.na(dat2$miRNA_up_mRNA_dn) | !is.na(dat2$miRNA_dn_mRNA_up))` pairs are DE in opposite direction, and `r sum(!is.na(dat2$miRNA_up_mRNA_up) | !is.na(dat2$miRNA_dn_mRNA_dn))` pairs are DE in the same direction.
+
+Here are pairs that show up in opposite direction in some comparison and show up in same direction on another
+```{r}
+dat2 %>% 
+  dplyr::filter(!is.na(miRNA_up_mRNA_dn) | !is.na(miRNA_dn_mRNA_up)) %>% 
+  dplyr::filter(!is.na(miRNA_up_mRNA_up) | !is.na(miRNA_dn_mRNA_dn)) %>% 
+  knitr::kable()
+```
+
+In the end, we did not remove pairs that are DE in the same direction because it might be results of mRNA being targeted by other regulators than miRNA. We take all `r sum(!is.na(dat2$miRNA_up_mRNA_dn) | !is.na(dat2$miRNA_dn_mRNA_up))` pairs that are DE in opposite direction. That consist of `r length(unique(targetPairsDE$miRNA))` miRNAs and `r length(unique(targetPairsDE$target))` genes.
+
+# Calculate correlation
+
+```{r}
+minames <- unlist(c(resZEmi,resSEmi), use.names = FALSE) %>% 
+  unique()
+```
+
+Of `r length(minames)` miRNAs that are DE in any comparisons, we will check their correlation against mRNA expression value of all the possible targets first, then check for the actual sequence match from target prediction table.
+
+Read metadata tables that contains matching mRNA and miRNA samples
+```{r}
+miR_lowQual <- c("PabK14-03SM_SR1","PabK14-03RO_SR2","Pab738_2_FMG_MIR1")
+
+samples <- bind_rows(
+  read_csv(here("doc/metadataSE_mRNA_miRNA.csv"), show_col_types = FALSE) %>% 
+    dplyr::filter(! is.na(miR_NGI_ID)) %>% 
+    mutate(Replicate = as.character(Replicate),
+           Type = "SE",
+           StageType = paste0(Type, "_", Stage),
+           Stage = paste0("S",Stage),
+           Dataset = "SE") %>% 
+    dplyr::filter(Stage %in% paste0("S", 1:6)),
+  read_csv(here("doc/metadataZE_mRNA_miRNA.csv"), show_col_types = FALSE) %>% 
+    dplyr::filter(! is.na(miR_NGI_ID)) %>% 
+    mutate(StageType = paste0(Type, "_", Stage),
+           Stage = paste0("Z",Stage),
+           Dataset = "ZE")) %>% 
+  mutate(StageType = factor(StageType,
+                        levels = c(
+                          paste0("SE_",1:6),
+                          paste0("SD_",1:3),
+                          paste0("ZE_",c(4:7,"8-9",10)),
+                          paste0("FG_",c(4:7,"8-9",10)))),
+         Stage = factor(Stage, levels = c(paste0("S",1:6),paste0("Z",c(1:7,"8-9",10))))) %>% 
+  dplyr::filter(! miR_User_ID %in% miR_lowQual)
+
+mtargets <- targetPairs %>% 
+  pull(target) %>% 
+  strsplit(split = ".", fixed = TRUE) %>% 
+  map_chr(~ .x[[1]]) %>% 
+  unique()
+```
+
+we load expression data (vst) of both miRNA and mRNA dataset
+```{r, message=FALSE}
+vstmiSE <- readRDS(here("data/analysis/results/miRNA_SE_nonmodelaware-vst.rds"))
+vstmiZE <- readRDS(here("data/analysis/results/miRNA_ZE_nonmodelaware-vst.rds"))
+
+vstmSE <- readRDS(here("data/analysis/mRNA/mRNA_SE_nonmodelaware-vst_omitSeedling.rds"))
+colnames(vstmSE) <- gsub("_S[0-9].*$","", colnames(vstmSE))
+vstmZE <- readRDS(here("data/analysis/mRNA/mRNA_ZE_nonmodelaware-vst.rds"))
+```
+
+## SE dataset
+
+```{r}
+minames <- unlist(resSEmi, use.names = FALSE) %>% unique()
+```
+
+For SE dataset, there are `r length(minames)` miRNAs that are DE in any comparisons.
+
+Arrange both miRNA vst table and mRNA vst tablt to have similar colOrder accoding to the samples table
+```{r}
+samplesSE <- samples %>% 
+  dplyr::filter(Dataset == "SE")
+
+stopifnot(all(samplesSE$SampleID %in% colnames(vstmSE)))
+rname <- intersect(rownames(vstmSE), mtargets)
+vstm <- vstmSE[rname, samplesSE$SampleID]
+
+stopifnot(all(samplesSE$miR_User_ID %in% colnames(vstmiSE)))
+vstmi <- vstmiSE[minames, samplesSE$miR_User_ID]
+```
+
+Remove genes and miRNAs that have 0 reads in all SE samples
+```{r}
+vstmi <- vstmi %>% 
+  .[rowSums(.) > 0, ] %>% 
+  .[rowSds(.) > 0, ]
+
+vstm <- vstm %>% 
+  .[rowSums(.) > 0, ] %>% 
+  .[rowSds(.) > 0, ]
+```
+
+Compute correlation of DE plant miRNAs against target mRNAs
+```{r, eval=FALSE}
+plan(strategy = "multisession")
+samplewise_cor <- future_lapply(minames, function(mi) {
+  e_miR <- vstmi[mi, ]
+
+  if (sd(e_miR) == 0) return(NULL)
+
+  map_dfr(rownames(vstm), function(m) {
+    e_mR <- vstm[m, ]
+
+    ct <- cor.test(e_miR, e_mR, method = "pearson")
+    return(tibble(
+      miRNA = mi,
+      mRNA  = m,
+      cor   = unname(ct$estimate),
+      pval  = ct$p.value))
+  })
+}) %>% 
+  bind_rows()
+plan(strategy = "sequential")
+saveRDS(samplewise_cor, here("data/analysis/results/flipComp_1stTier_SE_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds"))
+```
+
+Histogram of correlation coefficients
+```{r}
+samplewise_cor <- readRDS(here("data/analysis/results/flipComp_1stTier_SE_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds"))
+hist(samplewise_cor$cor)
+```
+
+correlation coefficient vs -log10(pvalue)
+```{r}
+ggplot(samplewise_cor, aes(x=cor, y=-log10(pval))) +
+  geom_point() +
+  theme_bw()
+```
+
+Maximum correlation coefficient with pval < 0.05
+```{r}
+samplewise_cor %>% 
+  dplyr::filter(cor < 0 & pval < 0.05) %>% 
+  pull(cor) %>% 
+  max()
+```
+
+## ZE dataset
+
+```{r}
+minames <- unlist(resZEmi, use.names = FALSE) %>% unique()
+```
+
+For ZE dataset, there are `r length(minames)` miRNAs that are DE in any comparisons.
+
+Arrange both miRNA vst table and mRNA vst tablt to have similar colOrder accoding to the samples table
+```{r}
+samplesZE <- samples %>% 
+  dplyr::filter(Dataset == "ZE")
+
+stopifnot(all(samplesZE$SampleID %in% colnames(vstmZE)))
+rname <- intersect(rownames(vstmZE), mtargets)
+# vstm <- vstmZE[rname, samplesZE$SampleID]
+
+stopifnot(all(samplesZE$miR_User_ID %in% colnames(vstmiZE)))
+# vstmi <- vstmiZE[minames, samplesZE$miR_User_ID]
+```
+
+Divide the tables into SD+ZE and SD+FMG
+```{r}
+sel_SDZE <- samplesZE %>% 
+  dplyr::filter(Type %in% c("SD","ZE")) %>% 
+  arrange(Stage)
+
+sel_SDFG <- samplesZE %>% 
+  dplyr::filter(Type %in% c("SD","FG")) %>% 
+  arrange(Stage)
+```
+
+### SD + ZE
+
+```{r}
+vstm <- vstmZE[rname, sel_SDZE$SampleID]
+vstmi <- vstmiZE[minames, sel_SDZE$miR_User_ID]
+```
+
+Remove genes and miRNAs that have 0 reads in all ZE samples
+```{r}
+vstmi <- vstmi %>% 
+  .[rowSums(.) > 0, ] %>% 
+  .[rowSds(.) > 0, ]
+
+vstm <- vstm %>% 
+  .[rowSums(.) > 0, ] %>% 
+  .[rowSds(.) > 0, ]
+```
+
+Compute correlation of DE plant miRNAs against target mRNAs
+```{r, eval=FALSE}
+plan(strategy = "multisession")
+samplewise_cor <- future_lapply(minames, function(mi) {
+  e_miR <- vstmi[mi, ]
+
+  if (sd(e_miR) == 0) return(NULL)
+
+  map_dfr(rownames(vstm), function(m) {
+    e_mR <- vstm[m, ]
+
+    ct <- cor.test(e_miR, e_mR, method = "pearson")
+    return(tibble(
+      miRNA = mi,
+      mRNA  = m,
+      cor   = unname(ct$estimate),
+      pval  = ct$p.value))
+  })
+}) %>% 
+  bind_rows()
+plan(strategy = "sequential")
+saveRDS(samplewise_cor, here("data/analysis/results/flipComp_1stTier_ZE_SDZE_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds"))
+```
+
+Histogram of correlation coefficients
+```{r}
+samplewise_cor <- readRDS(here("data/analysis/results/flipComp_1stTier_ZE_SDZE_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds"))
+hist(samplewise_cor$cor)
+```
+
+correlation coefficient vs -log10(pvalue)
+```{r}
+ggplot(samplewise_cor, aes(x=cor, y=-log10(pval))) +
+  geom_point() +
+  theme_bw()
+```
+
+Maximum correlation coefficient with pval < 0.05
+```{r}
+samplewise_cor %>% 
+  dplyr::filter(cor < 0 & pval < 0.05) %>% 
+  pull(cor) %>% 
+  max()
+```
+
+### SD + FMG
+
+```{r}
+vstm <- vstmZE[rname, sel_SDFG$SampleID]
+vstmi <- vstmiZE[minames, sel_SDFG$miR_User_ID]
+```
+
+Remove genes and miRNAs that have 0 reads in all ZE samples
+```{r}
+vstmi <- vstmi %>% 
+  .[rowSums(.) > 0, ] %>% 
+  .[rowSds(.) > 0, ]
+
+vstm <- vstm %>% 
+  .[rowSums(.) > 0, ] %>% 
+  .[rowSds(.) > 0, ]
+```
+
+
+Compute correlation of DE plant miRNAs against target mRNAs
+```{r, eval=FALSE}
+plan(strategy = "multisession")
+samplewise_cor <- future_lapply(minames, function(mi) {
+  e_miR <- vstmi[mi, ]
+
+  if (sd(e_miR) == 0) return(NULL)
+
+  map_dfr(rownames(vstm), function(m) {
+    e_mR <- vstm[m, ]
+
+    ct <- cor.test(e_miR, e_mR, method = "pearson")
+    return(tibble(
+      miRNA = mi,
+      mRNA  = m,
+      cor   = unname(ct$estimate),
+      pval  = ct$p.value))
+  })
+}) %>% 
+  bind_rows()
+plan(strategy = "sequential")
+saveRDS(samplewise_cor, here("data/analysis/results/flipComp_1stTier_ZE_SDFG_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds"))
+```
+
+Histogram of correlation coefficients
+```{r}
+samplewise_cor <- readRDS(here("data/analysis/results/flipComp_1stTier_ZE_SDFG_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds"))
+hist(samplewise_cor$cor)
+```
+
+correlation coefficient vs -log10(pvalue)
+```{r}
+ggplot(samplewise_cor, aes(x=cor, y=-log10(pval))) +
+  geom_point() +
+  theme_bw()
+```
+
+Maximum correlation coefficient with pval < 0.05
+```{r}
+samplewise_cor %>% 
+  dplyr::filter(cor < 0 & pval < 0.05) %>% 
+  pull(cor) %>% 
+  max()
+```
+
+## Redo Benjamini and Hochberg-adjusted p < 0.05
+
+The number of target pairs affect the cutoff of each dataset. I will combine all of the dataset specific correlation tables together and redo FDR correction. The one that use both dataset in one run I will discard. Ref: https://pmc.ncbi.nlm.nih.gov/articles/PMC2686738/
+
+```{r}
+samplewise_cor <- list(
+  SE = readRDS(here("data/analysis/results/flipComp_1stTier_SE_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds")),
+  SDZE = readRDS(here("data/analysis/results/flipComp_1stTier_ZE_SDZE_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds")),
+  SDFG = readRDS(here("data/analysis/results/flipComp_1stTier_ZE_SDFG_onlyTargetPairs_finalMetadata_corrSampleWise_withPval.rds"))) %>% 
+  bind_rows(.id = "Dataset") %>% 
+  mutate(padj = p.adjust(pval, method = "BH"))
+```
+
+Maximum correlation coefficient with padj < 0.05
+```{r}
+samplewise_cor %>% 
+  dplyr::filter(cor < 0 & padj < 0.05) %>% 
+  pull(cor) %>% 
+  max()
+```
+
+# Target prediction combined with DE and correlation (negative correlation coefficient with padj < 0.05)
+
+We combine prediction results from prediction programs with the pearson correlations and the one shows up in DE
+```{r}
+targetPairs_pcor <- samplewise_cor %>% 
+  split(., .$Dataset) %>% 
+  map(dplyr::filter, cor < 0 & padj < 0.05) %>% 
+  map(dplyr::select,-Dataset) %>% 
+  imap(~ dplyr::rename(
+    .x,
+    target = mRNA,
+    !!paste0("cor", .y) := cor,
+    !!paste0("pval", .y) := pval,
+    !!paste0("padj", .y) := padj))
+
+targetPairsFinal <- targetPairs %>%
+  mutate(target = strsplit(target, split = ".", fixed = TRUE) %>% map_chr(~ .x[[1]])) %>% 
+  left_join(readRDS(here("data/analysis/results/flipComp_1stTier_TargetPairs_finalMetadata_DEdirections.rds")) %>% 
+              dplyr::select(miRNA,target,selComp), by = c("miRNA","target")) %>% 
+  left_join(targetPairs_pcor[["SE"]], by = c("miRNA","target")) %>% 
+  left_join(targetPairs_pcor[["SDZE"]], by = c("miRNA","target")) %>% 
+  left_join(targetPairs_pcor[["SDFG"]], by = c("miRNA","target")) %>% 
+  mutate(isSE = (!is.na(corSE) | grepl("SE",selComp)),
+         isZE = (!is.na(corSDZE) | !is.na(corSDFG) | grepl("SD",selComp) | grepl("ZE",selComp) | grepl("FG",selComp)))
+
+saveRDS(targetPairsFinal, here("data/analysis/results/flipComp_1stTier_TargetPairsFinal_withPval.rds"))
+```
+
+From `r nrow(targetPairsFinal)` predicted pairs, here are numbers of pair show up from DE and correlation
+```{r}
+ggVennDiagram(list(DE = which(! is.na(targetPairsFinal$selComp)),
+                   pcorSE = which(! is.na(targetPairsFinal$corSE)),
+                   pcorSDZE = which(! is.na(targetPairsFinal$corSDZE)),
+                   pcorSDFG = which(! is.na(targetPairsFinal$corSDFG))),
+              label_alpha = 0, label = "count") + 
+  scale_fill_gradient(low="white",high = "dodgerblue") + 
+  scale_x_continuous(expand = expansion(mult = .1))
+```
+
+DE method yield more pairs. Interestingly there are some that show up as target pairs from all methods and correlations we try, they are
+```{r}
+targetPairsFinal %>% 
+  dplyr::filter(! is.na(selComp)) %>% 
+  dplyr::filter(! is.na(corSE)) %>% 
+  dplyr::filter(! is.na(corSDZE)) %>% 
+  dplyr::filter(! is.na(corSDFG)) %>% 
+  left_join(annotRow %>% dplyr::rename(miRNA = id), by = "miRNA") %>% 
+  knitr::kable()
+```
+
+# Expression plots of target pairs
+
+We will plot `r sum(!(is.na(targetPairsFinal$corSE) & is.na(targetPairsFinal$corSDZE) & is.na(targetPairsFinal$corSDFG)))` pairs that are predicted by at least 3 programs and detected as pair by correlation method. For pairs that are detected by DE method, we still keep them but they are not suitable for this type of plot.
+```{r}
+stopifnot(all(rownames(vstmiSE) == rownames(vstmiZE)))
+vstmi <- cbind(vstmiSE,vstmiZE)
+
+rname <- intersect(rownames(vstmSE), rownames(vstmZE))
+vstm <- cbind(vstmSE[rname,],vstmZE[rname,])
+
+samples$Type <- factor(samples$Type, levels = c("SE","SD","ZE","FG"))
+```
+
+### Targeted in SE
+
+`r sum(! is.na(targetPairsFinal$corSE))` pairs
+
+```{r, fig.width=15, fig.height=7, message=FALSE, warning=FALSE}
+targetPairsFinal %>% 
+  dplyr::filter(! is.na(targetPairsFinal$corSE)) %>% 
+  split(., .$miRNA) %>% 
+  map(pull, target) %>% 
+  iwalk(function(g,mi){
+    
+    if (length(g) == 1) {
+      dat1 <- vstm[intersect(rownames(vstm),g),] %>%
+        as.data.frame() %>% 
+        setNames(g) %>% 
+        scale() %>%
+        as.data.frame() %>% 
+        rownames_to_column("SampleID") %>%
+        inner_join(samples, by = "SampleID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                     names_to = "id", values_to = "scaled_expression")# %>%
+        #mutate(id = "targets")
+    } else {
+      dat1 <- vstm[intersect(rownames(vstm),g),] %>%
+        t() %>%
+        scale() %>%
+        as.data.frame() %>%
+        rownames_to_column("SampleID") %>%
+        inner_join(samples, by = "SampleID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                     names_to = "id", values_to = "scaled_expression")# %>%
+        #mutate(id = "targets")
+    }
+    
+    if (length(g) > 12) {anncol = colorRampPalette(brewer.pal(12,"Set3"))(length(g))
+    } else {anncol = brewer.pal(length(g),"Set3")}
+    
+    dat2 <- vstmi[intersect(rownames(vstmi),mi),] %>%
+      scale() %>%
+      as.data.frame() %>%
+      setNames(mi) %>%
+        rownames_to_column("miR_User_ID") %>%
+        inner_join(samples, by = "miR_User_ID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                   names_to = "id", values_to = "scaled_expression")# %>%
+      #mutate(id = "miRNA")
+    
+    if(mi %in% mature_known){
+      knownID <- paste(mature_refs$Description[mature_refs$id == mi])
+    } else { knownID <- ""}
+    
+    p <- ggplot(bind_rows(dat1,dat2),aes(x = StageType, y = scaled_expression, col = id, group = id)) +  
+      geom_jitter(width = 0.2, alpha = 0.5) +
+      geom_smooth(se = FALSE) +
+      facet_grid(col = vars(Type), scale = "free") +
+      scale_color_manual(values = c(setNames("black",mi),
+                                    setNames(anncol,g))) +
+      theme_bw() +
+      theme(legend.position = "bottom") +
+      ggtitle(paste(mi, knownID))
+    plot(p)
+})
+```
+
+### Targeted in SDZE
+
+`r sum(! is.na(targetPairsFinal$corSDZE))` pairs
+
+```{r, fig.width=15, fig.height=7, message=FALSE, warning=FALSE}
+targetPairsFinal %>% 
+  dplyr::filter(! is.na(targetPairsFinal$corSDZE)) %>% 
+  split(., .$miRNA) %>% 
+  map(pull, target) %>% 
+  iwalk(function(g,mi){
+    
+    if (length(g) == 1) {
+      dat1 <- vstm[intersect(rownames(vstm),g),] %>%
+        as.data.frame() %>% 
+        setNames(g) %>% 
+        scale() %>%
+        as.data.frame() %>% 
+        rownames_to_column("SampleID") %>%
+        inner_join(samples, by = "SampleID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                     names_to = "id", values_to = "scaled_expression")# %>%
+        #mutate(id = "targets")
+    } else {
+      dat1 <- vstm[intersect(rownames(vstm),g),] %>%
+        t() %>%
+        scale() %>%
+        as.data.frame() %>%
+        rownames_to_column("SampleID") %>%
+        inner_join(samples, by = "SampleID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                     names_to = "id", values_to = "scaled_expression")# %>%
+        #mutate(id = "targets")
+    }
+    
+    if (length(g) > 12) {anncol = colorRampPalette(brewer.pal(12,"Set3"))(length(g))
+    } else {anncol = brewer.pal(length(g),"Set3")}
+    
+    dat2 <- vstmi[intersect(rownames(vstmi),mi),] %>%
+      scale() %>%
+      as.data.frame() %>%
+      setNames(mi) %>%
+        rownames_to_column("miR_User_ID") %>%
+        inner_join(samples, by = "miR_User_ID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                   names_to = "id", values_to = "scaled_expression")# %>%
+      #mutate(id = "miRNA")
+    
+    if(mi %in% mature_known){
+      knownID <- paste(mature_refs$Description[mature_refs$id == mi])
+    } else { knownID <- ""}
+    
+    p <- ggplot(bind_rows(dat1,dat2),aes(x = StageType, y = scaled_expression, col = id, group = id)) +  
+      geom_jitter(width = 0.2, alpha = 0.5) +
+      geom_smooth(se = FALSE) +
+      facet_grid(col = vars(Type), scale = "free") +
+      scale_color_manual(values = c(setNames("black",mi),
+                                    setNames(anncol,g))) +
+      theme_bw() +
+      theme(legend.position = "bottom") +
+      ggtitle(paste(mi, knownID))
+    plot(p)
+})
+```
+
+### Targeted in SDFG
+
+`r sum(! is.na(targetPairsFinal$corSDFG))` pairs
+
+```{r, fig.width=15, fig.height=7, message=FALSE, warning=FALSE}
+targetPairsFinal %>% 
+  dplyr::filter(! is.na(targetPairsFinal$corSDFG)) %>% 
+  split(., .$miRNA) %>% 
+  map(pull, target) %>% 
+  iwalk(function(g,mi){
+    
+    if (length(g) == 1) {
+      dat1 <- vstm[intersect(rownames(vstm),g),] %>%
+        as.data.frame() %>% 
+        setNames(g) %>% 
+        scale() %>%
+        as.data.frame() %>% 
+        rownames_to_column("SampleID") %>%
+        inner_join(samples, by = "SampleID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                     names_to = "id", values_to = "scaled_expression")# %>%
+        #mutate(id = "targets")
+    } else {
+      dat1 <- vstm[intersect(rownames(vstm),g),] %>%
+        t() %>%
+        scale() %>%
+        as.data.frame() %>%
+        rownames_to_column("SampleID") %>%
+        inner_join(samples, by = "SampleID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                     names_to = "id", values_to = "scaled_expression")# %>%
+        #mutate(id = "targets")
+    }
+    
+    if (length(g) > 12) {anncol = colorRampPalette(brewer.pal(12,"Set3"))(length(g))
+    } else {anncol = brewer.pal(length(g),"Set3")}
+    
+    dat2 <- vstmi[intersect(rownames(vstmi),mi),] %>%
+      scale() %>%
+      as.data.frame() %>%
+      setNames(mi) %>%
+        rownames_to_column("miR_User_ID") %>%
+        inner_join(samples, by = "miR_User_ID") %>%
+        pivot_longer(cols = setdiff(colnames(.), colnames(samples)),
+                   names_to = "id", values_to = "scaled_expression")# %>%
+      #mutate(id = "miRNA")
+    
+    if(mi %in% mature_known){
+      knownID <- paste(mature_refs$Description[mature_refs$id == mi])
+    } else { knownID <- ""}
+    
+    p <- ggplot(bind_rows(dat1,dat2),aes(x = StageType, y = scaled_expression, col = id, group = id)) +  
+      geom_jitter(width = 0.2, alpha = 0.5) +
+      geom_smooth(se = FALSE) +
+      facet_grid(col = vars(Type), scale = "free") +
+      scale_color_manual(values = c(setNames("black",mi),
+                                    setNames(anncol,g))) +
+      theme_bw() +
+      theme(legend.position = "bottom") +
+      ggtitle(paste(mi, knownID))
+    plot(p)
+})
+```
+
+# GO enrichment of the target genes
+
+Preparation: test set
+```{r}
+resList = list(
+  "Targets_All" = targetPairsFinal %>% dplyr::filter(!(is.na(selComp) & is.na(corSE) & is.na(corSDZE) & is.na(corSDFG)),) %>% pull(target) %>% unique(),
+  "Targets_SE" = targetPairsFinal %>% dplyr::filter(isSE) %>% pull(target) %>% unique(),
+  "Targets_ZE" = targetPairsFinal %>% dplyr::filter(isZE) %>% pull(target) %>% unique(),
+  "Targets_Both" = targetPairsFinal %>% dplyr::filter(isSE & isZE) %>% pull(target) %>% unique(),
+  "Targets_SEonly" = targetPairsFinal %>% dplyr::filter(isSE & !isZE) %>% pull(target) %>% unique(),
+  "Targets_ZEonly" = targetPairsFinal %>% dplyr::filter(isZE & !isSE) %>% pull(target) %>% unique())
+```
+
+Preparation: background set = genes that has expression in at least 2 samples
+```{r}
+rname <- intersect(rownames(vstmSE), rownames(vstmZE))
+vstm <- cbind(vstmSE[rname,],vstmZE[rname,]) %>% 
+  .[rowSums(.) > 0, ] %>% 
+  .[rowSds(.) > 0, ]
+background <- rownames(vstm)[rowSums(vstm > 0) > 1]
+```
+
+Number of genes in background set: `r length(background)`
+
+Preparation: GO terms
+```{r}
+# annot <- read_tsv("reference/Picea-abies/v2.0/annotation/Picab02_230926_at01_longest_representative_annotations_merged_sorted.tsv.gz", col_names = T, show_col_types = F) %>%
+annot <- read_tsv("reference/Picea-abies/v2.0/annotation/Picab02_230926_at01_longest_representative_annotations_merged_sorted.tsv.gz", 
+                  col_names = TRUE, show_col_types = FALSE) %>%
+  separate_wider_delim(id, delim = ".",names = c("GeneID", "mRNA", "mRNAID")) %>%
+  mutate(GOs = paste0(gsub(",","|",eggnog_go),"|",gsub(",","|",interpro_go))) %>%
+  dplyr::select(GeneID, GOs)
+
+goannot <- lapply(unlist(annot[,2],use.names=FALSE),strsplit,"\\|") %>%
+  lapply(unlist) %>%
+  lapply(unique) %>%
+  lapply(function(x) x[! x == "NA"])
+names(goannot) <- unlist(annot[,1],use.names=FALSE)
+
+remove(annot)
+
+# remove terms that are not present in arabidopsis
+atannot <- read_tsv("reference/Arabidopsis-thaliana/ARAPORT11/annotation/ATH_GO_GOSLIM_091024.txt.gz", 
+                    col_names = FALSE, show_col_types = FALSE, comment = "!") %>% 
+  pull(X6) %>% 
+  unique()
+
+goannot <- goannot %>% 
+  map(intersect, atannot) %>% 
+  discard(~ length(.x) == 0)
+```
+
+Enrichment
+```{r, message=FALSE}
+enrList <- map(resList, ~ topGO(.x, background, goannot, alpha=0.05, p.adjust="BH", getgenes=TRUE))
+saveRDS(enrList, here("data/analysis/mRNA/flipComp_1stTier_GOenrBH_targets_withPval.rds"))
+
+enrList <- map(enrList, ~ discard(.x, ~ length(.x) == 0))
+enrList <- discard(enrList, ~ length(.x) == 0)
+```
+
+## Dotplot
+```{r}
+iwalk(enrList, function(e,p){
+  dat <- e %>%
+    map(dplyr::select, -allgenes, -siggenes) %>% 
+    bind_rows(.id = "GOcategory") %>% 
+    mutate(FDR = parse_double(sub("<","",FDR)),
+           GeneRatio = Significant/Annotated,
+           Count = as.numeric(Significant)) %>%
+    mutate(Term = factor(Term, levels = Term[order(GeneRatio)]))
+  p <- ggplot(dat, aes(x =Term, y = GeneRatio, color = FDR, size = Count)) + 
+    geom_point() +
+    scale_color_gradient(low = "red", high = "blue") +
+    theme_bw() + 
+    ylab("GeneRatio") + 
+    xlab("") + 
+    facet_grid(GOcategory ~ ., scales = "free", space = "free") +
+    ggtitle(paste0(p," GO enrichment")) +
+    coord_flip()
+  plot(p)
+})
+```
+
+# Session Info
+
+````{r session info, echo=FALSE}
+sessionInfo()
+````
+

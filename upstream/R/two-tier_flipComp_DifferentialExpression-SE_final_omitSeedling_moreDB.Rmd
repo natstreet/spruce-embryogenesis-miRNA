@@ -1,0 +1,829 @@
+---
+title: "Spruce SE miRNA Differential Expression"
+author: "Theerarat Kochakarn"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    fig_width: 12
+    fig_height: 9
+    toc: true
+    number_sections: true
+    toc_depth: 6
+    toc_float:
+      collapsed: FALSE
+      smooth_scroll: TRUE
+    code_folding: hide
+    theme: "flatly"
+    highlight: pygments
+  # includes:
+  #   before_body: header.html
+  #   after_body: footer.html
+  # css: style.css
+---
+
+````{r opts, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+````
+
+# Setup
+
+* Libraries
+
+````{r library,results='hide',warning=FALSE,message=FALSE}
+library(data.table)
+library(DESeq2)
+library(emoji)
+library(gplots)
+library(here)
+library(hyperSpec)
+library(PCAtools)
+library(RColorBrewer)
+library(tidyverse)
+library(ggVennDiagram)
+library(pheatmap)
+library(UpSetR)
+library(viridis)
+library(patchwork)
+library(ggupset)
+````
+
+* Helper files
+
+````{r helpers,results='hide',warning=FALSE,message=FALSE}
+source(here("../UPSCb-common/Rtoolbox/src/plotEnrichedTreemap.R"))
+source(here("../UPSCb-common/src/R/featureSelection.R"))
+source(here("../UPSCb-common/src/R/volcanoPlot.R"))
+source(here("../UPSCb-common/src/R/functions_DifferentialExpression.R"))
+````
+
+* Color schemes
+
+````{r}
+pal=brewer.pal(8,"Dark2")
+hpal <- colorRampPalette(c("blue","white","red"))(100)
+mar <- par("mar")
+colorList <- list("all" = "purple","up" = "red","dn" = "blue")
+
+anncol = list("plant" = c("nonplant" = "#D95F02","plant" = "#1B9E77"),
+              "known" = c("known" = "#0F5B71", "variant" = "#EEC06B", "novel" = "#CD2932"),
+              "sizeFactor" = colorRampPalette(brewer.pal(9,"RdPu"))(20),
+              "DE" = c("up" = "red","dn" = "blue"),
+              "StageType" = c(
+                setNames(brewer.pal(9,"Greens")[2:9],paste0("SE_",1:8)),
+                setNames(brewer.pal(9,"Purples")[2:4],paste0("SD_",1:3)),
+                setNames(brewer.pal(9,"Blues")[4:9],paste0("ZE_",c(4:7,"8-9",10))),
+                setNames(brewer.pal(9,"Reds")[4:9],paste0("FG_",c(4:7,"8-9",10)))))
+````
+
+* Sample information
+
+Samples for miRNA analysis
+```{r}
+samples <- bind_rows(
+  read_tsv(here("doc/metadata_SE.tsv"), show_col_types=F) %>%
+    dplyr::filter(! grepl("-unk",stage)) %>% 
+    dplyr::rename(sample = NGI_ID,
+                  sampleName = User_ID) %>%
+    mutate(temp = gsub("PabK14-03","",sampleName),
+           Stage = gsub("-unk","",stage)) %>%
+    separate_wider_delim(temp, delim = "_", names = c("SampleType","rep")) %>%
+    mutate(Dataset = "SE",
+           Type = "SE",
+           StageType = gsub("S","SE_",Stage),
+           Replicate = substr(rep,3,3),
+           SampleName = paste0(Stage,"-",SampleType,"-",Replicate)) %>% 
+    dplyr::select(-stage, -Mreads, -`>=Q30`, -Status, -rep, -replicate),
+  read_csv(here("doc/metadataZE_mRNA_miRNA.csv"), show_col_types = FALSE) %>% 
+    dplyr::filter(! is.na(miR_NGI_ID)) %>% 
+    mutate(StageType = paste0(Type, "_", Stage),
+           Stage = paste0("Z",Stage)) %>% 
+    mutate(StageType = factor(StageType, levels = c(paste0("SD_",1:3),
+                                                    "ZE_4","FG_4",
+                                                    "ZE_5","FG_5",
+                                                    "ZE_6","FG_6",
+                                                    "ZE_7","FG_7",
+                                                    "ZE_8-9","FG_8-9",
+                                                    "ZE_10","FG_10")),
+           Stage = factor(as.character(Stage), levels = paste0("Z",as.character(c(1:7,"8-9",10)))),
+           Dataset = "ZE") %>% 
+    dplyr::select(-SampleID, -lincRNA_ID) %>% 
+    dplyr::rename(sample = miR_NGI_ID,
+                  sampleName = miR_User_ID,
+                  description = SampleDescription)) %>% 
+  mutate(StageType = factor(StageType,
+                        levels = c(
+                          paste0("SE_",1:8),
+                          paste0("SD_",1:3),
+                          paste0("ZE_",c(4:7,"8-9",10)),
+                          paste0("FG_",c(4:7,"8-9",10)))),
+         Stage = factor(Stage, levels = c(paste0("S",1:8),paste0("Z",c(1:7,"8-9",10)))))
+
+  # mutate(StageType = factor(StageType, levels = c(paste0("SD_",1:3),
+  #                                                 "ZE_4","FG_4",
+  #                                                 "ZE_5","FG_5",
+  #                                                 "ZE_6","FG_6",
+  #                                                 "ZE_7","FG_7",
+  #                                                 "ZE_8-9","FG_8-9",
+  #                                                 "ZE_10","FG_10")),
+```
+
+* Count data
+
+Count from bowtie alignment on mature miRNAs that were predicted by miRDP2
+````{r}
+counts <- read_tsv(here("data/analysis/results/bowtie/count_DE.txt"), show_col_types = F) %>%
+  column_to_rownames("Gene_id") %>%
+  setNames(gsub("_count","",basename(colnames(.)))) %>%
+  as.matrix()
+````
+
+* miRNA predictions
+
+```{r}
+mature <- seqinr::read.fasta(here("data/analysis/results/Picea_mature.fa"), seqtype = "DNA", as.string = T, forceDNAtolower = F)
+matureSeq <- map(mature, as.character)
+matureDF <- as.data.frame(matureSeq) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("id") %>%
+  dplyr::rename(mature = V1)
+
+# passed_plant_criteria <- map(list.files(here("data/analysis/results"), full.names = T, recursive = T, pattern = "filter_P_prediction$"),
+#     read_tsv, show_col_type = F, col_names = c("chr","strand","read","name","coord1","coord2","mature","precurser")) %>%
+#   setNames(list.files(here("data/analysis/results"), full.names = F, recursive = T, pattern = "filter_P_prediction$") %>%
+#              dirname() %>% gsub(".fq.gz.dedup","",.)) %>%
+#   map(left_join,matureDF,by = "mature")
+# saveRDS(passed_plant_criteria, here("data/analysis/results/passed_plant_criteria.rds"))
+passed_plant_criteria <- readRDS(here("data/analysis/results/passed_plant_criteria.rds"))
+
+passed_plant_criteria_id <- passed_plant_criteria %>%
+  map(function(d){
+    keep_at(matureSeq, at = matureSeq %in% d$mature)
+  }) %>%
+  map(names)
+
+mature_plant <- keep_at(matureSeq, at = unique(unlist(passed_plant_criteria_id, use.names = F)))
+```
+
+* Annotation with more miR databases (miRBase, PMRD, PmiREN)
+```{r}
+# mature_blast <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_blastn_250_parsed.txt"), show_col_types = F)
+# knownList <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_known.txt"), 
+#                       show_col_types = FALSE, col_names = colnames(mature_blast))
+# variantList <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_variant.txt"), 
+#                         show_col_types = FALSE, col_names = colnames(mature_blast)) %>% 
+#   filter(!Query_acc %in% knownList$Query_acc)
+# 
+# knownList %>% 
+#   select(Query_acc, `Hit name`, Description) %>% 
+#   mutate(Description = gsub("&$", "", Description)) %>% 
+#   write_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_knownID.txt"), col_names = FALSE)
+# 
+# dat <- variantList %>% 
+#   split(., .$Query_acc) %>% 
+#   map(slice_max, `Query cover`*`Hit cover`*(Identity/100))
+# 
+# full_join(
+#   dat %>% map(pull, `Hit name`) %>% 
+#     map(paste, collapse = "|") %>% 
+#     map(as.data.frame) %>% 
+#     bind_rows(.id = "miRNA"),
+#   dat %>% map(pull, Description) %>% 
+#     map(~ gsub("&$", "", .x)) %>% 
+#     map(paste, collapse = "|") %>% 
+#     map(as.data.frame) %>% 
+#     bind_rows(.id = "miRNA"), 
+#   by = "miRNA") %>% 
+#   write_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_variantID.txt"), col_names = FALSE)
+
+mature_known <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_knownID.txt"), show_col_types = FALSE, col_names = FALSE)$X1
+mature_variant <- read_tsv(here("data/analysis/results/blast_moreMiR/Picea_mature_250_variantID.txt"), show_col_types = FALSE, col_names = FALSE)$X1
+```
+
+Make annotation for miRNAs
+```{r}
+annotRow <- data.frame("id" = rownames(counts)) %>%
+  mutate(plant = ifelse(id %in% names(mature_plant), "plant", "nonplant"),
+         known = ifelse(id %in% mature_known, "known",
+                        ifelse(id %in% mature_variant, "variant", "novel"))) %>%
+  dplyr::select(id,plant,known)
+```
+
+**We remove 3 samples of lower quality `PabK14-03SM_SR1`, `PabK14-03RO_SR2` and `Pab738_2_FMG_MIR1` that have clean unique reads less than 20,000 reads per sample. Please refer to post_miRDP2_BioQA report for plots.**
+
+<hr />
+&nbsp;
+
+# Prepare data
+
+Here we filter for SE samples
+```{r}
+lowQual <- c("PabK14-03SM_SR1","PabK14-03RO_SR2","Pab738_2_FMG_MIR1")
+sel <- setdiff(samples$sampleName[samples$Dataset == "SE"],lowQual)
+samples <- samples[samples$sampleName %in% sel,]
+```
+
+Make annotations
+```{r}
+annotCol <- samples %>% 
+  dplyr::select(sampleName,StageType) %>% 
+  column_to_rownames("sampleName")
+
+anncol[["StageType"]] <- anncol[["StageType"]][unique(samples$StageType)]
+```
+
+The comparison will be made between adjacent stages SE_1 vs SE_2, SE_2 vs SE_3, and so on. All comparisons are as follow
+```{r}
+comp <- list(
+  "SE2_vs_SE1" = list(treatment = "SE_2", control = "SE_1"),
+  "SE3_vs_SE2" = list(treatment = "SE_3", control = "SE_2"),
+  "SE4_vs_SE3" = list(treatment = "SE_4", control = "SE_3"),
+  "SE5_vs_SE4" = list(treatment = "SE_5", control = "SE_4"),
+  "SE6_vs_SE5" = list(treatment = "SE_6", control = "SE_5"))#,
+#  "SE7_vs_SE6" = list(treatment = "SE_7", control = "SE_6"),
+#  "SE8_vs_SE7" = list(treatment = "SE_8", control = "SE_7"))
+knitr::kable(bind_rows(comp, .id = "comparison"))
+```
+
+# DEseq2 with 1st-tier predicted miRNAs
+
+collapse all reads from second tier to Unaligned
+```{r}
+kept <- intersect(unique(c(names(mature_plant),mature_known,mature_variant)),read_lines(here("data/analysis/results/repChecked.txt")))
+
+countk <- read_tsv(here("data/analysis/results/bowtie/count_DE.txt"), show_col_types = F) %>%
+  split(., .$Gene_id %in% kept) %>% 
+  imap(function(d,n){
+    if(!as.logical(n)){
+      #print(colSums(d[,-1]))
+      dat <- data.frame(Unaligned = colSums(d[,-1])) %>% 
+        t() %>% 
+        as.data.frame() %>% 
+        rownames_to_column("Gene_id")
+      return(dat) } else { return(d) }
+  }) %>% 
+  bind_rows() %>%
+  column_to_rownames("Gene_id") %>%
+  setNames(gsub("_count","",basename(colnames(.)))) %>%
+  as.matrix() %>% 
+  .[, samples$sample] 
+```
+
+Make dds object and normalize
+```{r}
+dds <- DESeqDataSetFromMatrix(countData=countk[,samples$sample], colData=samples, design = ~ StageType) %>% suppressWarnings()
+colnames(dds) <- dds$sampleName
+
+dds <- estimateSizeFactors(dds) %>% 
+  suppressMessages()
+
+vsd <- varianceStabilizingTransformation(dds, blind=TRUE)
+vst <- assay(vsd)
+vst <- vst - min(vst)
+
+boxplot(split(t(sizeFactors(dds)),dds$StageType),las=2,
+        main="Sequencing libraries size factor by Stage")
+```
+
+## DE results and violin plots
+
+Here I will loop over all comparisons. The results will be filtered based on a FDR threshold of 0.01 and a minimum log2FC of 0.5.
+````{r, message=FALSE}
+resultsList <- map(comp, function(c){
+  dds$StageType <- relevel(dds$StageType, ref = c[["control"]])
+  dds <- DESeq(dds)
+  res <- results(dds, contrast=c("StageType",c[["treatment"]],c[["control"]]), lfcThreshold = 0.5, pAdjustMethod = "BH", alpha = 0.01)
+  volcanoPlot(res, alpha = 0.01, lfc = 0.5)
+  return(res)
+})
+````
+
+## Other plots
+
+Pulling DE miRNAs ids
+```{r}
+resultsNames <- resultsList %>% 
+  map(as.data.frame) %>% 
+  map(rownames_to_column, "id") %>% 
+  map(~ mutate(.x, sig = ifelse(is.na(padj),"ns",
+                         ifelse(padj < 0.01 & log2FoldChange > 0.5, "up",
+                         ifelse(padj < 0.01 & log2FoldChange < -0.5, "dn","ns"))))) %>%
+  map(~ split(.x, f=.x$sig)) %>%
+  map(~ map(.x, pull, "id")) %>%
+  map(discard_at, at = "ns") %>% 
+  purrr::transpose(.names = c("up","dn"))
+```
+
+### Heatmaps of DE miRNAs
+
+These heatmaps are from non-model-aware vst-normalized expression values
+
+```{r}
+annotDE <- resultsNames %>%
+  map(map, as.data.frame) %>%
+  map(bind_rows, .id = "Comparison") %>% 
+  bind_rows(.id = "DE") %>% 
+  dplyr::rename(id = `.x[[i]]`) %>% 
+  left_join(annotRow, by = "id") %>%
+  split(., f = .$Comparison) %>% 
+  map(dplyr::select, -Comparison) %>% 
+  map(remove_rownames) %>%
+  map(column_to_rownames,"id")
+
+
+iwalk(annotDE, function(a,n){
+  if(nrow(a) == 1){
+    mat <- vst[rownames(vst) %in% rownames(a),] %>% 
+      t() %>% 
+      as.matrix()
+    rownames(mat) <- rownames(a)
+    
+    hm <- pheatmap(mat,
+                 color = viridis(20),
+                 annotation_col = annotCol,
+                 annotation_row = a,
+                 annotation_colors = anncol,
+                 border_color = NA,
+                 cluster_cols = FALSE,
+                 cluster_rows = FALSE,
+                 show_rownames = FALSE,
+                 labels_col = samples$StageType,
+                 angle_col = 90,
+                 legend = TRUE,
+                 main = paste0("non-modelaware vst: ", n))
+    hm
+  } else {
+    mat <- vst[rownames(vst) %in% rownames(a),]
+    
+    hm <- pheatmap(mat,
+                 color = viridis(20),
+                 annotation_col = annotCol,
+                 annotation_row = a,
+                 annotation_colors = anncol,
+                 border_color = NA,
+                 cluster_cols = FALSE,
+                 show_rownames = FALSE,
+                 clustering_method = "ward.D2",
+                 labels_col = samples$StageType,
+                 angle_col = 90,
+                 legend = TRUE,
+                 main = paste0("non-modelaware vst: ", n))
+    hm
+  }
+})
+```
+
+### Counts of DE miRNAs
+
+```{r, fig.width=10, fig.height=5}
+dat <- resultsNames %>% 
+  map(~ map(.x, function(l){ 
+    k <- length(intersect(l,mature_known))
+    v <- length(intersect(l,mature_variant))
+    n <- length(l) - k - v
+    return(data.frame(Type = c("known","variant","novel_P"), Counts = c(k,v,n)))
+    })) %>% 
+  map(bind_rows, .id = "Comparisons") %>% 
+  bind_rows(.id = "DE") %>% 
+  mutate(DE = factor(DE, levels = c("up","dn")),
+         Type = factor(Type, levels = c("known", "variant", "novel_P")))
+
+ggplot(dat, aes(x=DE, y=Counts, fill=Type)) +
+  geom_col() +
+  facet_grid(cols = vars(Comparisons)) +
+  scale_fill_manual(values =  c("known" = "#0F5B71", "variant" = "#EEC06B", "novel_P" = "#CD2932")) +
+  ggtitle("DE miRNAs") +
+  theme_bw()
+```
+
+### Upset plots of DE miRNAs
+
+```{r}
+dat <- data.frame("id" = kept) %>%
+  mutate(annotation = ifelse(id %in% mature_known, "known",
+                      ifelse(id %in% mature_variant, "variant", "novel_P")) %>%
+           factor(levels = c("known", "variant", "novel_P")),
+         "up_SE2vsSE1" = id %in% resultsNames[["up"]]$SE2_vs_SE1,
+         "up_SE3vsSE2" = id %in% resultsNames[["up"]]$SE3_vs_SE2,
+         "up_SE4vsSE3" = id %in% resultsNames[["up"]]$SE4_vs_SE3,
+         "up_SE5vsSE4" = id %in% resultsNames[["up"]]$SE5_vs_SE4,
+         "up_SE6vsSE5" = id %in% resultsNames[["up"]]$SE6_vs_SE5,
+         #"up_SE7vsSE6" = id %in% resultsNames[["up"]]$SE7_vs_SE6,
+         #"up_SE8vsSE7" = id %in% resultsNames[["up"]]$SE8_vs_SE7,
+         "down_SE2vsSE1" = FALSE, #id %in% resultsNames[["dn"]]$SE2_vs_SE1,
+         "down_SE3vsSE2" = id %in% resultsNames[["dn"]]$SE3_vs_SE2,
+         "down_SE4vsSE3" = id %in% resultsNames[["dn"]]$SE4_vs_SE3,
+         "down_SE5vsSE4" = id %in% resultsNames[["dn"]]$SE5_vs_SE4,
+         "down_SE6vsSE5" = id %in% resultsNames[["dn"]]$SE6_vs_SE5) %>% #,
+         #"down_SE7vsSE6" = id %in% resultsNames[["dn"]]$SE7_vs_SE6,
+         #"down_SE8vsSE7" = id %in% resultsNames[["dn"]]$SE8_vs_SE7) %>% 
+  rowwise() %>% 
+  mutate(.,
+         UpRegulated = list(grep("^up_", names(.), value = TRUE)[c_across(all_of(grep("^up_", names(.), value = TRUE)))]),
+         DownRegulated = list(grep("^down_", names(.), value = TRUE)[c_across(all_of(grep("^down_", names(.), value = TRUE)))]),
+         AllDE = list(grep("^[ud]", names(.), value = TRUE)[c_across(all_of(grep("^[ud]", names(.), value = TRUE)))])) %>% 
+  ungroup()
+```
+
+#### Up-regulated
+```{r}
+upset(fromList(resultsNames[["up"]]), sets = rev(names(comp)), order.by = "freq", nsets = 7, nintersects = NA, keep.order = TRUE)
+
+ggplot(dat %>% dplyr::filter(map_dbl(dat$UpRegulated, length) > 0), aes(x=UpRegulated)) +
+  geom_bar(aes(fill=annotation)) +
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=-1) +
+  scale_x_upset(n_sets = 7) + #, order_by = "degree") +
+  scale_y_continuous(lim = c(0, 50), name = "Intersection size") +
+  xlab("") +
+  scale_fill_manual(values = c(
+    "known"         = "#0F5C70",
+    "variant"       = "#F1C16F",
+    "novel_P"    = "#CD2932")) +
+  theme_classic()
+```
+
+#### Down-regulated
+```{r}
+#upset(fromList(resultsNames[["dn"]]), sets = rev(names(comp)), order.by = "freq", nsets = 7, nintersects = NA, keep.order = TRUE)
+upset(fromList(resultsNames[["dn"]]), sets = setdiff(rev(names(comp)),"SE2_vs_SE1"), order.by = "freq", nsets = 7, nintersects = NA, keep.order = TRUE)
+
+ggplot(dat %>% dplyr::filter(map_dbl(dat$DownRegulated, length) > 0), aes(x=DownRegulated)) +
+  geom_bar(aes(fill=annotation)) +
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=-1) +
+  scale_x_upset(n_sets = 7) + #, order_by = "degree") +
+  scale_y_continuous(lim = c(0, 55), name = "Intersection size") +
+  xlab("") +
+  scale_fill_manual(values = c(
+    "known"         = "#0F5C70",
+    "variant"       = "#F1C16F",
+    "novel_P"    = "#CD2932")) +
+  theme_classic()
+```
+
+#### Up and Down
+```{r}
+upsetList <- c(
+  setNames(resultsNames[["up"]],paste(names(resultsNames[["up"]]), "Up")),
+  setNames(resultsNames[["dn"]],paste(names(resultsNames[["dn"]]), "Down"))
+) %>%
+  keep_at(., map_dbl(., ~ length(.x)) > 0)
+
+upset(fromList(upsetList), sets = rev(names(upsetList)), order.by = "freq", nsets = length(upsetList), nintersects = NA, keep.order = TRUE)
+
+ggplot(dat %>% dplyr::filter(map_dbl(dat$AllDE, length) > 0), aes(x=AllDE)) +
+  geom_bar(aes(fill=annotation)) +
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=-1) +
+  scale_x_upset(n_sets = 14) + #, order_by = "degree") +
+  scale_y_continuous(lim = c(0, 35), name = "Intersection size") +
+  xlab("") +
+  scale_fill_manual(values = c(
+    "known"         = "#0F5C70",
+    "variant"       = "#F1C16F",
+    "novel_P"    = "#CD2932")) +
+  theme_classic()
+```
+
+### Jaccard Index
+
+Jaccard Index is count of intersection divide by count of the union. This will normalize by the number of members in each set
+```{r}
+dat <- c(
+  setNames(resultsNames[["up"]],paste(names(resultsNames[["up"]]), "Up")),
+  setNames(resultsNames[["dn"]],paste(names(resultsNames[["dn"]]), "Down"))) %>% 
+  discard_at(., at = (map_dbl(., length) == 0))
+
+mat1 <- matrix(data=0,nrow=length(dat),ncol=length(dat),dimnames = list(names(dat),names(dat)))
+mat2 <- matrix(data=0,nrow=length(dat),ncol=length(dat),dimnames = list(names(dat),names(dat)))
+
+for(i in 1:length(dat)){
+  for(j in 1:length(dat)){
+    rn <- rownames(mat1)[i]
+    cn <- colnames(mat1)[j]
+    
+    nIntersect <- intersect(dat[[rn]],dat[[cn]])
+    nUnion <- union(dat[[rn]],dat[[cn]])
+    
+    mat1[i,j] <- length(nIntersect)/length(nUnion)
+    mat2[i,j] <- length(intersect(nIntersect,c(mature_known, mature_variant)))/length(intersect(nUnion,c(mature_known, mature_variant)))
+    }
+}
+
+pheatmap(mat1,
+         cluster_rows = F,
+         cluster_cols = F,
+         display_numbers = T,
+         number_format = "%.2f",
+         breaks = seq(0, 0.5, length.out = 101),
+         main = "Jaccard index of DE miRNAs")
+
+pheatmap(mat2,
+         cluster_rows = F,
+         cluster_cols = F,
+         display_numbers = T,
+         number_format = "%.2f",
+         breaks = seq(0, 0.5, length.out = 101),
+         main = "Jaccard index of known/variant of known DE miRNAs")
+```
+
+# DEseq2 with 1st-tier predicted miRNAs, remove Seedlings
+
+Remove SE_7 and SE_8
+```{r}
+lowQual <- c("PabK14-03SM_SR1","PabK14-03RO_SR2","Pab738_2_FMG_MIR1")
+sel <- setdiff(samples$sampleName[samples$Stage %in% paste0("S",1:6)],lowQual)
+samples <- samples[samples$sampleName %in% sel,]
+```
+
+collapse all reads from second tier to Unaligned
+```{r}
+kept <- intersect(unique(c(names(mature_plant),mature_known,mature_variant)),read_lines(here("data/analysis/results/repChecked.txt")))
+
+countk <- read_tsv(here("data/analysis/results/bowtie/count_DE.txt"), show_col_types = F) %>%
+  split(., .$Gene_id %in% kept) %>% 
+  imap(function(d,n){
+    if(!as.logical(n)){
+      #print(colSums(d[,-1]))
+      dat <- data.frame(Unaligned = colSums(d[,-1])) %>% 
+        t() %>% 
+        as.data.frame() %>% 
+        rownames_to_column("Gene_id")
+      return(dat) } else { return(d) }
+  }) %>% 
+  bind_rows() %>%
+  column_to_rownames("Gene_id") %>%
+  setNames(gsub("_count","",basename(colnames(.)))) %>%
+  as.matrix() %>% 
+  .[, samples$sample] 
+```
+
+Make dds object and normalize
+```{r}
+dds <- DESeqDataSetFromMatrix(countData=countk[,samples$sample], colData=samples, design = ~ StageType) %>% suppressWarnings()
+colnames(dds) <- dds$sampleName
+
+dds <- estimateSizeFactors(dds) %>% 
+  suppressMessages()
+
+vsd <- varianceStabilizingTransformation(dds, blind=TRUE)
+vst <- assay(vsd)
+vst <- vst - min(vst)
+
+boxplot(split(t(sizeFactors(dds)),dds$StageType),las=2,
+        main="Sequencing libraries size factor by Stage")
+```
+
+## DE results and violin plots
+
+Here I will loop over all comparisons. The results will be filtered based on a FDR threshold of 0.01 and a minimum log2FC of 0.5.
+````{r, message=FALSE}
+resultsList <- map(comp, function(c){
+  dds$StageType <- relevel(dds$StageType, ref = c[["control"]])
+  dds <- DESeq(dds)
+  res <- results(dds, contrast=c("StageType",c[["treatment"]],c[["control"]]), lfcThreshold = 0.5, pAdjustMethod = "BH", alpha = 0.01)
+  volcanoPlot(res, alpha = 0.01, lfc = 0.5)
+  return(res)
+})
+````
+
+## Other plots
+
+Pulling DE miRNAs ids
+```{r}
+resultsNames <- resultsList %>% 
+  map(as.data.frame) %>% 
+  map(rownames_to_column, "id") %>% 
+  map(~ mutate(.x, sig = ifelse(is.na(padj),"ns",
+                         ifelse(padj < 0.01 & log2FoldChange > 0.5, "up",
+                         ifelse(padj < 0.01 & log2FoldChange < -0.5, "dn","ns"))))) %>%
+  map(~ split(.x, f=.x$sig)) %>%
+  map(~ map(.x, pull, "id")) %>%
+  map(discard_at, at = "ns") %>% 
+  purrr::transpose(.names = c("up","dn"))
+```
+
+### Heatmaps of DE miRNAs
+
+These heatmaps are from non-model-aware vst-normalized expression values
+
+```{r}
+annotDE <- resultsNames %>%
+  map(map, as.data.frame) %>%
+  map(bind_rows, .id = "Comparison") %>% 
+  bind_rows(.id = "DE") %>% 
+  dplyr::rename(id = `.x[[i]]`) %>% 
+  left_join(annotRow, by = "id") %>%
+  split(., f = .$Comparison) %>% 
+  map(dplyr::select, -Comparison) %>% 
+  map(remove_rownames) %>%
+  map(column_to_rownames,"id")
+
+
+iwalk(annotDE, function(a,n){
+  if(nrow(a) == 1){
+    mat <- vst[rownames(vst) %in% rownames(a),] %>% 
+      t() %>% 
+      as.matrix()
+    rownames(mat) <- rownames(a)
+    
+    hm <- pheatmap(mat,
+                 color = viridis(20),
+                 annotation_col = annotCol,
+                 annotation_row = a,
+                 annotation_colors = anncol,
+                 border_color = NA,
+                 cluster_cols = FALSE,
+                 cluster_rows = FALSE,
+                 show_rownames = FALSE,
+                 labels_col = samples$StageType,
+                 angle_col = 90,
+                 legend = TRUE,
+                 main = paste0("non-modelaware vst: ", n))
+    hm
+  } else {
+    mat <- vst[rownames(vst) %in% rownames(a),]
+    
+    hm <- pheatmap(mat,
+                 color = viridis(20),
+                 annotation_col = annotCol,
+                 annotation_row = a,
+                 annotation_colors = anncol,
+                 border_color = NA,
+                 cluster_cols = FALSE,
+                 show_rownames = FALSE,
+                 clustering_method = "ward.D2",
+                 labels_col = samples$StageType,
+                 angle_col = 90,
+                 legend = TRUE,
+                 main = paste0("non-modelaware vst: ", n))
+    hm
+  }
+})
+```
+
+### Counts of DE miRNAs
+
+```{r, fig.width=10, fig.height=5}
+dat <- resultsNames %>% 
+  map(~ map(.x, function(l){ 
+    k <- length(intersect(l,mature_known))
+    v <- length(intersect(l,mature_variant))
+    n <- length(l) - k - v
+    return(data.frame(Type = c("known","variant","novel_P"), Counts = c(k,v,n)))
+    })) %>% 
+  map(bind_rows, .id = "Comparisons") %>% 
+  bind_rows(.id = "DE") %>% 
+  mutate(DE = factor(DE, levels = c("up","dn")),
+         Type = factor(Type, levels = c("known", "variant", "novel_P")))
+
+ggplot(dat, aes(x=DE, y=Counts, fill=Type)) +
+  geom_col() +
+  facet_grid(cols = vars(Comparisons)) +
+  scale_fill_manual(values =  c("known" = "#0F5B71", "variant" = "#EEC06B", "novel_P" = "#CD2932")) +
+  ggtitle("DE miRNAs") +
+  theme_bw()
+```
+
+### Upset plots of DE miRNAs
+
+```{r}
+dat <- data.frame("id" = kept) %>%
+  mutate(annotation = ifelse(id %in% mature_known, "known",
+                      ifelse(id %in% mature_variant, "variant", "novel_P")) %>%
+           factor(levels = c("known", "variant", "novel_P")),
+         "up_SE2vsSE1" = id %in% resultsNames[["up"]]$SE2_vs_SE1,
+         "up_SE3vsSE2" = id %in% resultsNames[["up"]]$SE3_vs_SE2,
+         "up_SE4vsSE3" = id %in% resultsNames[["up"]]$SE4_vs_SE3,
+         "up_SE5vsSE4" = id %in% resultsNames[["up"]]$SE5_vs_SE4,
+         "up_SE6vsSE5" = id %in% resultsNames[["up"]]$SE6_vs_SE5,
+         #"up_SE7vsSE6" = id %in% resultsNames[["up"]]$SE7_vs_SE6,
+         #"up_SE8vsSE7" = id %in% resultsNames[["up"]]$SE8_vs_SE7,
+         "down_SE2vsSE1" = FALSE, #id %in% resultsNames[["dn"]]$SE2_vs_SE1,
+         "down_SE3vsSE2" = id %in% resultsNames[["dn"]]$SE3_vs_SE2,
+         "down_SE4vsSE3" = id %in% resultsNames[["dn"]]$SE4_vs_SE3,
+         "down_SE5vsSE4" = id %in% resultsNames[["dn"]]$SE5_vs_SE4,
+         "down_SE6vsSE5" = id %in% resultsNames[["dn"]]$SE6_vs_SE5) %>% #,
+         #"down_SE7vsSE6" = id %in% resultsNames[["dn"]]$SE7_vs_SE6,
+         #"down_SE8vsSE7" = id %in% resultsNames[["dn"]]$SE8_vs_SE7) %>% 
+  rowwise() %>% 
+  mutate(.,
+         UpRegulated = list(grep("^up_", names(.), value = TRUE)[c_across(all_of(grep("^up_", names(.), value = TRUE)))]),
+         DownRegulated = list(grep("^down_", names(.), value = TRUE)[c_across(all_of(grep("^down_", names(.), value = TRUE)))]),
+         AllDE = list(grep("^[ud]", names(.), value = TRUE)[c_across(all_of(grep("^[ud]", names(.), value = TRUE)))])) %>% 
+  ungroup()
+```
+
+#### Up-regulated
+```{r}
+upset(fromList(resultsNames[["up"]]), sets = rev(names(comp)), order.by = "freq", nsets = 7, nintersects = NA, keep.order = TRUE)
+
+ggplot(dat %>% dplyr::filter(map_dbl(dat$UpRegulated, length) > 0), aes(x=UpRegulated)) +
+  geom_bar(aes(fill=annotation)) +
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=-1) +
+  scale_x_upset(n_sets = 7) + #, order_by = "degree") +
+  scale_y_continuous(lim = c(0, 50), name = "Intersection size") +
+  xlab("") +
+  scale_fill_manual(values = c(
+    "known"         = "#0F5C70",
+    "variant"       = "#F1C16F",
+    "novel_P"    = "#CD2932")) +
+  theme_classic()
+```
+
+#### Down-regulated
+```{r}
+#upset(fromList(resultsNames[["dn"]]), sets = rev(names(comp)), order.by = "freq", nsets = 7, nintersects = NA, keep.order = TRUE)
+upset(fromList(resultsNames[["dn"]]), sets = setdiff(rev(names(comp)),"SE2_vs_SE1"), order.by = "freq", nsets = 7, nintersects = NA, keep.order = TRUE)
+
+ggplot(dat %>% dplyr::filter(map_dbl(dat$DownRegulated, length) > 0), aes(x=DownRegulated)) +
+  geom_bar(aes(fill=annotation)) +
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=-1) +
+  scale_x_upset(n_sets = 7) + #, order_by = "degree") +
+  scale_y_continuous(lim = c(0, 55), name = "Intersection size") +
+  xlab("") +
+  scale_fill_manual(values = c(
+    "known"         = "#0F5C70",
+    "variant"       = "#F1C16F",
+    "novel_P"    = "#CD2932")) +
+  theme_classic()
+```
+
+#### Up and Down
+```{r}
+upsetList <- c(
+  setNames(resultsNames[["up"]],paste(names(resultsNames[["up"]]), "Up")),
+  setNames(resultsNames[["dn"]],paste(names(resultsNames[["dn"]]), "Down"))
+) %>%
+  keep_at(., map_dbl(., ~ length(.x)) > 0)
+
+upset(fromList(upsetList), sets = rev(names(upsetList)), order.by = "freq", nsets = length(upsetList), nintersects = NA, keep.order = TRUE)
+
+ggplot(dat %>% dplyr::filter(map_dbl(dat$AllDE, length) > 0), aes(x=AllDE)) +
+  geom_bar(aes(fill=annotation)) +
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=-1) +
+  scale_x_upset(n_sets = 14) + #, order_by = "degree") +
+  scale_y_continuous(lim = c(0, 35), name = "Intersection size") +
+  xlab("") +
+  scale_fill_manual(values = c(
+    "known"         = "#0F5C70",
+    "variant"       = "#F1C16F",
+    "novel_P"    = "#CD2932")) +
+  theme_classic()
+```
+
+### Jaccard Index
+
+Jaccard Index is count of intersection divide by count of the union. This will normalize by the number of members in each set
+```{r}
+dat <- c(
+  setNames(resultsNames[["up"]],paste(names(resultsNames[["up"]]), "Up")),
+  setNames(resultsNames[["dn"]],paste(names(resultsNames[["dn"]]), "Down"))) %>% 
+  discard_at(., at = (map_dbl(., length) == 0))
+
+mat1 <- matrix(data=0,nrow=length(dat),ncol=length(dat),dimnames = list(names(dat),names(dat)))
+mat2 <- matrix(data=0,nrow=length(dat),ncol=length(dat),dimnames = list(names(dat),names(dat)))
+
+for(i in 1:length(dat)){
+  for(j in 1:length(dat)){
+    rn <- rownames(mat1)[i]
+    cn <- colnames(mat1)[j]
+    
+    nIntersect <- intersect(dat[[rn]],dat[[cn]])
+    nUnion <- union(dat[[rn]],dat[[cn]])
+    
+    mat1[i,j] <- length(nIntersect)/length(nUnion)
+    mat2[i,j] <- length(intersect(nIntersect,c(mature_known, mature_variant)))/length(intersect(nUnion,c(mature_known, mature_variant)))
+    }
+}
+
+pheatmap(mat1,
+         cluster_rows = F,
+         cluster_cols = F,
+         display_numbers = T,
+         number_format = "%.2f",
+         breaks = seq(0, 0.5, length.out = 101),
+         main = "Jaccard index of DE miRNAs")
+
+pheatmap(mat2,
+         cluster_rows = F,
+         cluster_cols = F,
+         display_numbers = T,
+         number_format = "%.2f",
+         breaks = seq(0, 0.5, length.out = 101),
+         main = "Jaccard index of known/variant of known DE miRNAs")
+```
+
+Save data. I will use the count table without seedlings.
+```{r}
+saveRDS(list("res" = resultsList,
+             "names" = resultsNames),
+        here("data/analysis/results/flipComp_1stTier_finalSE_ddsResults.rds"))
+```
+
+# Session Info
+
+````{r session info, echo=FALSE}
+sessionInfo()
+````
+
