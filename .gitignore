@@ -1,0 +1,8 @@
+# inputs and outputs come from the SciLifeLab Data Repository item
+data/
+results/
+figures/
+data.tar.gz
+.Rhistory
+.RData
+.DS_Store

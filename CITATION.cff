@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the article and the data item."
+title: "miRNA dynamics in Norway spruce embryogenesis: analysis code"
+type: software
+license: MIT
+authors:
+  - family-names: "Street"
+    given-names: "Nathaniel R."
+    orcid: "https://orcid.org/0000-0001-6031-005X"
+  - family-names: "Rizvi"
+    given-names: "Ahsan Z."
+  - family-names: "Kochakarn"
+    given-names: "Theerarat"
+  - family-names: "Lind Björs"
+    given-names: "Josefine"
+  - family-names: "Stojkovič"
+    given-names: "Katja"
+  - family-names: "Canovi"
+    given-names: "Camilla"
+  - family-names: "Egertsdotter"
+    given-names: "Ulrika"
+repository-code: "https://github.com/natstreet/spruce-embryogenesis-miRNA"
+references:
+  - type: dataset
+    title: "miRNA dynamics in Norway spruce embryogenesis: processed data and analysis results"
+    doi: "10.17044/scilifelab.35037526"
+    authors:
+      - name: "Street et al."
