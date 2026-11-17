@@ -6,6 +6,8 @@ Analysis code for:
 Street, N.R., Rizvi, A.Z., Kochakarn, T., Lind Björs, J., Stojkovič, K., Canovi, C. & Egertsdotter, U.
 *Physiologia Plantarum* (DOI assigned on publication).
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24307186.svg)](https://doi.org/10.5281/zenodo.24307186)
+
 This repository contains the R scripts that reproduce the analyses, tables and figures of the article.
 The input data and the processed tables are archived separately (see **Data**); download them into
 the repository folder before running the scripts.
@@ -48,7 +50,8 @@ The analysis scripts overwrite the corresponding tables in `results/`, and the f
 PDF and a PNG to `figures/`.
 
 ## Citation
-Please cite the article and the data item (https://doi.org/10.17044/scilifelab.35037526). `CITATION.cff` gives the
+Please cite the article, the data item (https://doi.org/10.17044/scilifelab.35037526) and, for the
+code, version 1.0.0 archived at Zenodo (https://doi.org/10.5281/zenodo.24307186). `CITATION.cff` gives the
 citation in machine-readable form.
 
 ## Licence

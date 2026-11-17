@@ -3,6 +3,9 @@ message: "If you use this code, please cite the article and the data item."
 title: "miRNA dynamics in Norway spruce embryogenesis: analysis code"
 type: software
 license: MIT
+version: "1.0.0"
+doi: "10.5281/zenodo.24307186"
+date-released: "2026-11-17"
 authors:
   - family-names: "Street"
     given-names: "Nathaniel R."
