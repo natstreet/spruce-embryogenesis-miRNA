@@ -12,6 +12,7 @@ Run in this order. Each script writes to `results/`.
 | `Rscript scripts/stage_mapping_mRNA.R` | mRNA stage mapping between the somatic and zygotic series (Figure 5, lower panel) |
 | `Rscript scripts/S5_mapping_all_Zem_stages.R` | correlation of S5 with every zygotic embryo stage for miRNA and target gene sets (Figure S5B) |
 | `Rscript scripts/TableS7_overlap.R` | overlap of DE miRNAs between somatic culture transitions and zygotic transitions (Table S7) |
+| `Rscript scripts/TableS11_consistent_direction.R` | change at the matching developmental phase of the other series for miRNAs DE in only one series (Table S11) |
 | `Rscript scripts/stage_mapping_contributions.R` | contributions of single miRNAs and enrichment classes to the miRNA stage mapping |
 | `Rscript scripts/S6_FG89_GO.R` | GO enrichment of the genes behind the mRNA match of S6 with FG8-9 |
 | `Rscript scripts/GO_enrichment.R` | GO enrichment of target genes of supported pairs by series and by miRNA family (Tables S4, S5, S10; Figure 4) |
