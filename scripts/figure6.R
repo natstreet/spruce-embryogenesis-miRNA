@@ -16,9 +16,10 @@ key_scale <- scale_colour_manual(values = setNames(c(COL_FOCAL, COL_GREY), c(KEY
 ## pairs DE in the same direction); a pair that is opposite in one comparison and
 ## same in another (37 of all predicted pairs) is counted in both
 sh <- read_tsv("results/target_support_chance_shuffled_targets.tsv", show_col_types = FALSE)
-setsA <- c("all predicted" = "All predicted pairs\n(26,812)",
-           "four programs" = "Four-program pairs\n(18,482)",
-           "conserved transcription-factor modules" = "Conserved TF modules\n(159)")
+npairs <- sh %>% distinct(subset, n_pairs) %>% { setNames(format(.$n_pairs, big.mark = ",", trim = TRUE), .$subset) }
+setsA <- c("all predicted" = paste0("All predicted pairs\n(", npairs[["all predicted"]], ")"),
+           "four programs" = paste0("Four-program pairs\n(", npairs[["four programs"]], ")"),
+           "conserved transcription-factor modules" = paste0("Conserved TF modules\n(", npairs[["conserved transcription-factor modules"]], ")"))
 A <- sh %>% filter(subset %in% names(setsA), stat %in% c("opp_frac", "neg_frac")) %>%
   mutate(set = factor(setsA[subset], levels = rev(setsA)),
          stat = factor(c(opp_frac = "Opposite DE\n(% of opposite + same)",

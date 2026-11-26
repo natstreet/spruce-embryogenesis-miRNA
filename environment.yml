@@ -11,6 +11,7 @@ dependencies:
   - bioconductor-annotationdbi=1.68.0
   - bioconductor-topgo=2.58.0
   - bioconductor-go.db=3.20.0
+  - bioconductor-org.at.tair.db=3.20.0
   - r-tidyverse=2.0.0
   - r-dplyr=1.2.1
   - r-readr=2.2.0

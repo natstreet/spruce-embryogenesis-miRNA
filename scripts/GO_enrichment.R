@@ -1,16 +1,25 @@
 ## GO enrichment among the target genes of supported pairs: topGO parent-child algorithm, Fisher's exact
 ## test, terms kept at BH <= 0.05. Series level (Supplementary Tables S4 and S5, Figure 4) and per miRNA
 ## family and arm (Supplementary Table S10).
+## GO annotation: data/GO_annotation_Pabies2.tsv.gz, restricted to terms in the Arabidopsis GO annotation (see below).
 ## Background genes: vst > 0 in at least two libraries of data/mRNA_vst_SE.rds and data/mRNA_vst_ZE.rds.
 ## Usage, from the deposit root: Rscript scripts/GO_enrichment.R
 ## Outputs: results/GO/GO_terms.tsv, results/GO/GO_results.rds, results/GO_terms_Figure4.tsv
-suppressPackageStartupMessages({library(tidyverse); library(matrixStats); library(topGO); library(GO.db)})
+suppressPackageStartupMessages({library(tidyverse); library(matrixStats); library(topGO); library(GO.db); library(org.At.tair.db)})
 invisible(Sys.setlocale("LC_COLLATE", "C"))   # locale-independent gene order within each term
 out <- "results/GO"; dir.create(out, showWarnings = FALSE, recursive = TRUE)
 cat("topGO", as.character(packageVersion("topGO")), "GO.db", as.character(packageVersion("GO.db")), "\n")
 
-goannot <- read_tsv("data/GO_annotation_gopher_20261002.tsv.gz", col_names = FALSE, show_col_types = FALSE) %>%
+## Gene-to-GO annotation of P. abies v2.0 (eggNOG-mapper and InterProScan terms of the longest transcript of each gene).
+## Only GO terms that occur in the Arabidopsis GO annotation (org.At.tair.db), taken together with all their ancestor
+## terms (keytype GOALL), are kept. A term is therefore kept when Arabidopsis genes are annotated to it or to a descendant.
+goannot <- read_tsv("data/GO_annotation_Pabies2.tsv.gz", col_names = FALSE, show_col_types = FALSE) %>%
   mutate(X2 = strsplit(X2, "\\|")) %>% split(., .$X1) %>% map(pull, X2) %>% map(unlist)
+at_go <- unique(suppressMessages(AnnotationDbi::keys(org.At.tair.db, keytype = "GOALL")))
+n0 <- length(unique(unlist(goannot))); g0 <- length(goannot)
+goannot <- map(goannot, ~ .x[.x %in% at_go]) %>% keep(~ length(.x) > 0)
+cat("org.At.tair.db", as.character(packageVersion("org.At.tair.db")), "| GO terms in P. abies annotation", n0, "kept", length(unique(unlist(goannot))),
+    "| annotated genes", g0, "kept", length(goannot), "\n")
 
 vstmSE <- readRDS("data/mRNA_vst_SE.rds")
 vstmZE <- readRDS("data/mRNA_vst_ZE.rds")

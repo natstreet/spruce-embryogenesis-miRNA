@@ -23,9 +23,11 @@ for (z in c("FG8-9", "Zem8-9")) {
   res[[paste(z,"low")]]  <- rownames(cZ)[top][cS[top,"S6"] < 0]
   cat(z, "rho", round(sum(p),3), "| top 500 share", round(sum(p[top])/sum(p),2), "| high", length(res[[paste(z,"high")]]), "low", length(res[[paste(z,"low")]]), "\n")
 }
-ga <- read.delim(gzfile("data/GO_annotation_gopher_20261002.tsv.gz"), header = FALSE, stringsAsFactors = FALSE)
-ga$V1 <- sub("\\.mRNA\\.\\d+$", "", ga$V1)
-g2go <- setNames(strsplit(ga$V2, "\\|"), ga$V1)
+## GO annotation as in GO_enrichment.R: P. abies v2.0 terms restricted to those in the Arabidopsis GO annotation with ancestors
+ga <- read.delim(gzfile("data/GO_annotation_Pabies2.tsv.gz"), header = FALSE, stringsAsFactors = FALSE)
+at_go <- unique(suppressMessages(AnnotationDbi::keys(org.At.tair.db::org.At.tair.db, keytype = "GOALL")))
+g2go <- lapply(setNames(strsplit(ga$V2, "\\|"), ga$V1), function(x) x[x %in% at_go])
+g2go <- g2go[lengths(g2go) > 0]
 bg <- rownames(cZ)
 out <- list()
 for (nm in names(res)) for (o in c("BP","MF","CC")) {

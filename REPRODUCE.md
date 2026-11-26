@@ -9,6 +9,7 @@ Run in this order. Each script writes to `results/`.
 |---|---|
 | `Rscript scripts/DE_stages_voomQWB.R` | stage-to-stage DE for miRNAs and mRNAs (limma voomWithQualityWeights) |
 | `Rscript scripts/correlation_support.R` | within-dataset correlation of DE miRNAs with their predicted target genes |
+| `Rscript scripts/TableS9_chance_comparisons.R` | expression support of predicted pairs compared with shuffled targets and random genes (Table S9; Figure 6A, B) |
 | `Rscript scripts/stage_mapping_mRNA.R` | mRNA stage mapping between the somatic and zygotic series (Figure 5, lower panel) |
 | `Rscript scripts/S5_mapping_all_Zem_stages.R` | correlation of S5 with every zygotic embryo stage for miRNA and target gene sets (Figure S5B) |
 | `Rscript scripts/TableS7_overlap.R` | overlap of DE miRNAs between somatic culture transitions and zygotic transitions (Table S7) |
@@ -40,11 +41,10 @@ Each script writes a PDF and a PNG to `figures/`.
 ## 3. Tables read but not written by these scripts
 Some tables in `results/` are processed tables behind the article that no script in this repository
 writes. Among them are the paired embryo-versus-gametophyte test (Supplementary Table S6), the miRNA
-classes and families, the target-pair support flags and annotation (Supplementary Table S8), the chance
-comparisons for target support (Supplementary Table S9), the embryo signature index, the miRNA stage
-mapping and the Figure 1 panel data. `FILE_DESCRIPTIONS.txt` in the data archive describes each of them.
+classes and families, the target-pair support flags and annotation (Supplementary Table S8), the embryo signature index,
+the miRNA stage mapping and the Figure 1 panel data. `FILE_DESCRIPTIONS.txt` in the data archive describes each of them.
 
 ## 4. Software versions
-R 4.4.3 with DESeq2 1.46.0, limma 3.62.1, edgeR 4.4.0, topGO 2.58.0 and GO.db 3.20.0
-(Bioconductor 3.20); `environment.yml` gives all versions. Other Bioconductor releases can change the
+R 4.4.3 with DESeq2 1.46.0, limma 3.62.1, edgeR 4.4.0, topGO 2.58.0, GO.db 3.20.0 and
+org.At.tair.db 3.20.0 (Bioconductor 3.20); `environment.yml` gives all versions. Other Bioconductor releases can change the
 differential expression and GO results slightly.
