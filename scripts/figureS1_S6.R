@@ -38,7 +38,7 @@ save_fig(figS1, "FigureS1", MM_DOUBLE, 95)
 ## ---- S6  the seven miRNAs shared by S2->S3 and Zem8-9->Zem10 --------------
 s5 <- read.delim("results/FigureS6_shared_novel_miRNAs.tsv", stringsAsFactors = FALSE)
 COMP_LAB <- c(SE3_vs_SE2 = "S2\u2192S3\ntransfer to maturation medium",
-              `ZE10_vs_ZE8-9` = "Zem8-9\u2192Zem10\nzygotic desiccation",
+              `ZE10_vs_ZE8-9` = "Zem8-9\u2192Zem10\nto dry seed",
               SE6_vs_SE5 = "S5\u2192S6\nsomatic desiccation")
 s5 <- s5 %>% mutate(comp = factor(COMP_LAB[comp], levels = COMP_LAB),
                     id = sub("Picea_mature_", "", miR),

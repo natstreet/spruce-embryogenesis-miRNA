@@ -47,7 +47,7 @@ pB <- ggplot(tl, aes(zstage, lab, fill = rho)) +
   labs(x = "zygotic embryo stage", y = NULL, title = NULL) +
   theme_ms() + theme(panel.grid = element_blank())
 
-## ---- C  miRNAs that decrease at zygotic desiccation, in both series ----------
+## ---- C  miRNAs that decrease from Zem8-9 to Zem10, in both series ------------
 ## The 26 miRNAs DE and lower at Zem10 than at Zem8-9. Values are vst stage means
 ## centred on the mean of each miRNA within its own dataset.
 ZE_ORDER <- c("SD1", "SD2", "SD3", ZEM, paste0("FG", c(4:7, "8-9", 10)))

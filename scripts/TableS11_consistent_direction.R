@@ -9,11 +9,14 @@ pretty <- function(z) { p <- strsplit(z, "_vs_")[[1]]; x <- paste0(p[2], "\u2192
 comps <- list(ZE = c("SD2_vs_SD1","SD3_vs_SD2","ZE4_vs_SD3","ZE5_vs_ZE4","ZE6_vs_ZE5","ZE7_vs_ZE6","ZE8-9_vs_ZE7",
                      "ZE10_vs_ZE8-9","FG4_vs_SD3","FG5_vs_FG4","FG6_vs_FG5","FG7_vs_FG6","FG8-9_vs_FG7","FG10_vs_FG8-9"),
               SE = paste0("SE", 2:6, "_vs_SE", 1:5))
-## developmental phases used to match transitions between the series
+## developmental phases used to match transitions between the series. Zygotic desiccation is the period from
+## the last stage before desiccation (Zem6) to the desiccated seed in the cone (Zem8-9; stages 7 to 9 are the
+## desiccated, dormant seed in Stojkovic et al. 2024, which used the same samples). Zem8-9 -> Zem10 (desiccated seed
+## in the cone to dry seed of the previous year, from other mother trees) has no somatic counterpart and is not matched.
 phase <- c(SD2_vs_SD1 = "pre", SD3_vs_SD2 = "pre", SE2_vs_SE1 = "pre",
-           ZE5_vs_ZE4 = "mat", ZE6_vs_ZE5 = "mat", ZE7_vs_ZE6 = "mat", "ZE8-9_vs_ZE7" = "mat",
+           ZE5_vs_ZE4 = "mat", ZE6_vs_ZE5 = "mat",
            SE3_vs_SE2 = "mat", SE4_vs_SE3 = "mat", SE5_vs_SE4 = "mat",
-           "ZE10_vs_ZE8-9" = "des", SE6_vs_SE5 = "des")
+           ZE7_vs_ZE6 = "des", "ZE8-9_vs_ZE7" = "des", SE6_vs_SE5 = "des")
 
 ## published DE calls
 de <- do.call(rbind, lapply(unlist(comps), function(cc) {
