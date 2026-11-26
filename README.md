@@ -51,7 +51,7 @@ PDF and a PNG to `figures/`.
 
 ## Citation
 Please cite the article, the data item (https://doi.org/10.17044/scilifelab.35037526) and, for the
-code, version 1.0.0 archived at Zenodo (https://doi.org/10.5281/zenodo.24307186). `CITATION.cff` gives the
+code, version 1.0.1 archived at Zenodo (https://doi.org/10.5281/zenodo.24558606). `CITATION.cff` gives the
 citation in machine-readable form.
 
 ## Licence
